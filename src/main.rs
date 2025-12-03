@@ -5,6 +5,7 @@ use samod::{ConnDirection, DocumentId, Repo};
 use std::str::FromStr;
 use tokio_tungstenite::connect_async;
 
+mod config;
 mod documents;
 
 use documents::{DirectoryDocument, DirectoryEntry, FileDocument};

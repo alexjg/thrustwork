@@ -61,17 +61,22 @@ Set up proper CLI argument parsing with clap, replacing the current ad-hoc args 
 
 Create the configuration types that will be saved to `.pushwork/config.json`.
 
-- [ ] Create a `config` module
-- [ ] Define `DirectoryConfig` struct with serde derives:
+- [x] Create a `config` module
+- [x] Define `DirectoryConfig` struct with serde derives:
   - `root_directory_url: Option<String>` (set after creating root doc)
-  - `sync_server: String` (default: "wss://sync3.automerge.org")
+  - `sync_server: Option<String>` (default: "wss://sync3.automerge.org")
+  - `sync_server_storage_id: Option<String>` (matches pushwork)
+  - `sync_enabled: bool` (default: true)
   - `exclude_patterns: Vec<String>` (default: common patterns)
-- [ ] Implement `Default` for `DirectoryConfig`
-- [ ] Add functions to load/save config from/to JSON file
+  - `sync: SyncConfig` (move_detection_threshold)
+- [x] Implement `Default` for `DirectoryConfig`
+- [x] Add functions to load/save config from/to JSON file
+- [x] Add `ConfigError` enum for error handling
 
 **Notes:**
-- Match pushwork's config structure for compatibility
-- Default exclude patterns: `.pushwork`, `.git`, `node_modules`, etc.
+- Matches pushwork's DirectoryConfig structure for compatibility
+- Default exclude patterns: `.git`, `node_modules`, `*.tmp`, `.DS_Store`, `.pushwork`
+- Uses `skip_serializing_if = "Option::is_none"` for optional fields
 
 ---
 
