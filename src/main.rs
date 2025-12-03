@@ -7,6 +7,7 @@ use tokio_tungstenite::connect_async;
 
 mod config;
 mod documents;
+mod init;
 
 use documents::{DirectoryDocument, DirectoryEntry, FileDocument};
 
@@ -49,9 +50,21 @@ async fn connect_to_sync_server(repo: &Repo) {
 
     println!("WebSocket connected, starting sync protocol...");
 
-    // Spawn the connection handler - it runs in the background
-    let conn_future = repo.connect_tungstenite(ws_stream, ConnDirection::Outgoing);
-    tokio::spawn(conn_future);
+    // Set up the connection - returns immediately with a Connection handle
+    let conn = match repo.connect_tungstenite(ws_stream, ConnDirection::Outgoing) {
+        Ok(conn) => conn,
+        Err(_) => {
+            eprintln!("Failed to set up connection: repo stopped");
+            std::process::exit(1);
+        }
+    };
+
+    conn.handshake_complete()
+        .await
+        .unwrap_or_else(|_| {
+            eprintln!("Connection handshake failed");
+            std::process::exit(1);
+        });
 
     println!("Connected to sync server");
 }

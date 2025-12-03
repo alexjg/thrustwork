@@ -84,15 +84,17 @@ Create the configuration types that will be saved to `.pushwork/config.json`.
 
 Implement the directory initialization logic.
 
-- [ ] Create a function `init_directory(path: &Path) -> Result<()>`
-- [ ] Create `.pushwork/` directory
-- [ ] Create `.pushwork/automerge/` for repo storage
-- [ ] Handle error if `.pushwork` already exists (with --force option later)
-- [ ] Write initial config file (without root URL yet)
+- [x] Create a function `init_directory(path: &Path) -> Result<()>`
+- [x] Create `.pushwork/` directory
+- [x] Create `.pushwork/automerge/` for repo storage
+- [x] Handle error if `.pushwork` already exists (with --force option later)
+- [x] Write initial config file (without root URL yet)
 
 **Notes:**
-- Use `std::fs` for directory/file operations
-- Return descriptive errors for common failure cases
+- Created `src/init.rs` module with `PushworkPaths` struct and `create_directory_structure()` function
+- Uses `thiserror` for `InitError` enum
+- Returns `(PushworkPaths, DirectoryConfig)` tuple for use by later tasks
+- All 5 tests passing
 
 ---
 
@@ -100,17 +102,24 @@ Implement the directory initialization logic.
 
 Create the root directory document and update config with its URL.
 
-- [ ] Initialize samod Repo with filesystem storage in `.pushwork/automerge/`
-- [ ] Connect to sync server
-- [ ] Create empty `DirectoryDocument`
-- [ ] Reconcile to a new Automerge document
-- [ ] Create document in repo and get URL
-- [ ] Update config file with `root_directory_url`
-- [ ] Wait for sync to complete
+- [x] Initialize samod Repo with filesystem storage in `.pushwork/automerge/`
+- [x] Connect to sync server
+- [x] Create empty `DirectoryDocument`
+- [x] Reconcile to a new Automerge document
+- [x] Create document in repo and get URL
+- [x] Update config file with `root_directory_url`
+- [x] Wait for sync to complete
 
 **Notes:**
-- Use `samod::Repo::build_tokio().fs_storage(path).load().await`
-- The root directory should have empty `docs` array initially
+- Added `create_root_document()` async function to `src/init.rs`
+- Uses `TokioFilesystemStorage::new()` with `Repo::build_tokio().with_storage()`
+- Added error variants to `InitError`: `SyncConnect`, `CreateDocument`, `RepoStopped`, `ConnectionFailed`
+- Updated to use new samod `Connection` API:
+  - `connect_tungstenite()` returns `Result<Connection, Stopped>` immediately
+  - Must spawn a task that drives connection via `conn.finished().await`
+  - Use `conn.handshake_complete().await` to wait for handshake
+  - Use `conn.id()` to get `ConnectionId` for `they_have_our_changes()`
+- Also updated `main.rs` `connect_to_sync_server()` to use new Connection API
 
 ---
 

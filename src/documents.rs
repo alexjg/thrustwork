@@ -241,7 +241,7 @@ impl Default for DirectoryDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use automerge::{AutoCommit, Automerge, ReadDoc};
+    use automerge::{AutoCommit, ReadDoc};
     use autosurgeon::{hydrate, reconcile};
 
     #[test]
