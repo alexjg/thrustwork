@@ -202,6 +202,7 @@ The main dependencies will be:
 
 - `samod`: Automerge document management and sync
 - `automerge`: The underlying CRDT library
+- `autosurgeon`: Derive macros for mapping Rust structs to Automerge documents
 - `tokio`: Async runtime
 - `clap`: Command-line argument parsing
 - `serde`/`serde_json`: Configuration and snapshot serialization

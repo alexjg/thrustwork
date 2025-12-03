@@ -5,7 +5,7 @@ This document tracks the step-by-step implementation of features. It's organized
 The overall design we are working on is described in DESIGN.md and the separate phases of development are described in IMPLEMENTATION_PLAN.md. This document always tracks the development of one phase.
 
 **How to use this document:**
-- Each task block represents a reviewable unit of work 
+- Each task block represents a reviewable unit of work
 - **IMPORTANT: Stop for review after completing each task block before proceeding to the next**
 - Mark tasks as [x] when completed
 - Add notes about deviations or important decisions under each section
@@ -14,129 +14,159 @@ The overall design we are working on is described in DESIGN.md and the separate 
 **General Instructions**
 - Read DESIGN.md and IMPLEMENTATION_PLAN.md for context
 
----
-
-## Phase 1: Connect to Sync Server
-
-**Goal**: Verify we can use samod to connect to the Automerge sync server and
-create/read documents. This validates our core dependency before building
-anything else.
-
-**Deliverable**: A minimal binary that connects to the sync server, creates a
-document, and prints its URL.
+**Technical Decisions**
+- Using `autosurgeon` crate for mapping Rust structs to Automerge documents
+  - Provides `Reconcile` (write) and `Hydrate` (read) derive macros
+  - Use `#[autosurgeon(rename = "...")]` for field renaming (e.g., `@patchwork`, `mimeType`)
+  - Use `autosurgeon::Text` for text content (enables CRDT merging)
+  - Requires `AutoCommit` (not `Automerge`) for `reconcile()` calls
 
 ---
 
-### Task 1.1: Project Setup
+## Phase 2: Read and Write Pushwork Documents
 
-Set up the basic Cargo project with required dependencies.
+**Goal**: Create documents that match the pushwork schema and verify
+interoperability.
 
-- [x] Update Cargo.toml with dependencies:
-  - `samod = "0.3"`
-  - `automerge = "0.5"`
-  - `tokio = { version = "1", features = ["full"] }`
-- [x] Verify the project compiles with `cargo build`
+**Deliverable**: Can create file and directory documents that pushwork can
+read, and can read documents created by pushwork.
+
+---
+
+### Task 2.1: Define Document Types and Create a File Document
+
+Define Rust types for file and directory documents using autosurgeon, then create
+a file document matching the pushwork schema (see DESIGN.md Appendix A).
+
+- [ ] Define `FileDocument` struct with autosurgeon derives:
+  - `@patchwork` map with `type: "file"` (use nested struct + rename)
+  - `name`, `extension`, `mimeType` (String fields with appropriate renames)
+  - `content` (use `autosurgeon::Text` for now - binary handling later)
+  - `metadata` map with `permissions` (nested struct)
+- [ ] Define `DirectoryDocument` struct with autosurgeon derives:
+  - `@patchwork` map with `type: "folder"`
+  - `docs` array of `DirectoryEntry` structs
+  - `lastSyncAt` (Option<u64>)
+- [ ] Move types to a `documents` module
+- [ ] Write a test that creates a file document and verifies the keys
 
 **Notes:**
-- Using edition 2024
-- samod 0.5.1 with `tokio` and `tungstenite` features enabled
-- automerge 0.7.2 (pulled in transitively by samod)
-- tokio 1.48.0 with full features
-- Removed explicit automerge dependency - samod brings in the correct version
+- Prototype types already tested in `test_autosurgeon.rs`
+- Use `#[autosurgeon(rename = "@patchwork")]` for the patchwork field
+- Use `#[autosurgeon(rename = "type")]` for type discriminator (reserved word)
 
 ---
 
-### Task 1.2: Initialize a Samod Repo
+### Task 2.2: Create and Link Directory with File Entry
 
-Write minimal code to create a samod Repo with in-memory storage.
+Create a directory document and link it to a file document.
 
-- [x] Create a tokio async main function
-- [x] Initialize a samod Repo using `Repo::build_tokio()` or equivalent
-- [x] Use in-memory storage (no filesystem persistence yet)
-- [x] Verify it compiles and runs without crashing
+- [ ] Write a test that:
+  - Creates a `FileDocument` and reconciles it to an AutoCommit doc
+  - Creates a `DirectoryDocument` with an entry pointing to the file
+  - Reconciles the directory to another AutoCommit doc
+  - Verifies both documents have correct structure
+- [ ] Verify the directory's `docs` array contains the entry with correct fields
 
 **Notes:**
-- `samod::Repo::build_tokio().load().await` works as documented
-- In-memory storage is the default (no explicit configuration needed)
-- Repo provides a `peer_id()` method that returns a unique peer identifier
+- Directory types already defined in Task 2.1
+- The `url` field stores the automerge URL as a string
 
 ---
 
-### Task 1.3: Connect to Sync Server
+### Task 2.3: Read File Content from Document (Hydrate)
 
-Connect the repo to the public Automerge sync server.
+Verify that file documents can be hydrated back to Rust types.
 
-- [x] Connect to `wss://sync3.automerge.org` via WebSocket
-- [x] Handle connection errors gracefully (print error and exit)
-- [x] Verify connection succeeds (no errors on startup)
+- [ ] Write a test that:
+  - Creates a `FileDocument`, reconciles it
+  - Hydrates it back to a `FileDocument`
+  - Verifies all fields match (name, extension, mimeType, content, permissions)
+- [ ] Ensure `Text` content round-trips correctly
 
 **Notes:**
-- Added `tokio-tungstenite` dependency with `native-tls` feature for WebSocket client
-- samod's `connect_websocket` takes an already-established stream, not a URL
-- Use `tokio_tungstenite::connect_async(url)` to establish the WebSocket
-- Then pass the stream to `repo.connect_tungstenite(ws_stream, ConnDirection::Outgoing)`
-- The connection handler must be spawned as a background task
+- Use `autosurgeon::hydrate()` to read documents
+- `Text::to_string()` extracts the string value
 
 ---
 
-### Task 1.4: Create and Sync a Document
+### Task 2.4: Interop Test - Thrustwork to Pushwork
 
-Create a simple document and sync it to the server.
+Verify pushwork can read documents created by thrustwork.
 
-- [x] Create a new document using the repo
-- [x] Write a simple test value to the document (e.g., a string field)
-- [x] Print the document's Automerge URL to stdout
-- [x] Wait briefly for sync (e.g., 1-2 seconds)
-- [x] Shut down cleanly
-
-**Notes:**
-- Added `automerge = "0.7"` as direct dependency
-- Need to import `automerge::transaction::Transactable` trait to use `put()` method
-- Create document: `Automerge::new()`, then `doc.transact(|txn| { txn.put(...) })`
-- Pass to repo: `repo.create(doc).await`
-- Get URL: `doc_handle.url()` returns `AutomergeUrl` which implements Display
-
----
-
-### Task 1.5: Verify Round-Trip
-
-Verify that documents actually sync by reading back a document by URL.
-
-- [x] Modify the program to optionally accept a URL as a command-line argument
-- [x] If URL provided: find the document and print its contents
-- [x] If no URL: create a new document (existing behavior)
-- [x] Test by running twice: once to create, once to read back
+- [ ] Add a CLI subcommand (e.g., `create-test`) that:
+  - Creates a file document with sample content
+  - Creates a directory document containing the file
+  - Syncs both to the server
+  - Prints both URLs
+- [ ] Use pushwork to clone the directory URL
+- [ ] Verify pushwork sees the file with correct content
 
 **Verification:**
 ```
-# First run - creates document
-$ cargo run
-Created document: automerge:2ss1TDGDXtYLYVu4JWVdaxeRUNaf
+# Create with thrustwork
+$ cargo run -- create-test
+Created directory: automerge:xxx
+Created file: automerge:yyy
 
-# Second run - reads it back
-$ cargo run -- automerge:2ss1TDGDXtYLYVu4JWVdaxeRUNaf
-Found document!
-Document keys: ["test"]
-Document contents: test = Scalar(Str("hello from thrustwork"))
+# Read with pushwork (in another directory)
+$ pushwork clone automerge:xxx
+$ cat test.txt
+(should show content)
 ```
 
 **Notes:**
-- Parse URL by stripping `automerge:` prefix, then `DocumentId::from_str()`
-- Use `repo.find(doc_id).await` to look up document from sync server
-- Need brief delay (1s) after connecting before `find()` to let sync protocol establish
-- Use `ReadDoc` trait to access `doc.keys()` and `doc.get()`
-- `with_document(|doc| ...)` provides access to the underlying Automerge document
+- This is a manual integration test requiring pushwork installed
+- Record any schema compatibility issues discovered
 
 ---
 
-### Phase 1 Completion Checklist
+### Task 2.5: Interop Test - Pushwork to Thrustwork
 
-- [x] All tasks above completed
-- [x] Can create a document and print its URL
-- [x] Can read back a document by URL
-- [x] Sync server connection works reliably
-- [x] Code is clean enough to build on
+Verify thrustwork can read documents created by pushwork.
 
-**Phase 1 complete. Proceed to Phase 2 in IMPLEMENTATION_PLAN.md.**
+- [ ] Use pushwork to create a synced directory with a file
+- [ ] Get the root directory URL from pushwork
+- [ ] Add a CLI subcommand (e.g., `read-dir <url>`) that:
+  - Loads the directory document
+  - Hydrates it to `DirectoryDocument`
+  - For each entry, loads and hydrates the file document
+  - Prints the directory structure and file contents
+
+**Verification:**
+```
+# Create with pushwork
+$ mkdir test-dir && cd test-dir
+$ echo "hello from pushwork" > test.txt
+$ pushwork init
+$ pushwork sync
+$ pushwork url
+automerge:xxx
+
+# Read with thrustwork
+$ cargo run -- read-dir automerge:xxx
+Directory contents:
+  - test.txt (file)
+Content: "hello from pushwork"
+```
+
+**Notes:**
+- This verifies hydration works with real pushwork documents
+- Record any issues reading pushwork documents
+
+---
+
+### Phase 2 Completion Checklist
+
+- [ ] All tasks above completed
+- [ ] Document types defined with autosurgeon derives
+- [ ] Can create file documents with correct schema (reconcile)
+- [ ] Can create directory documents with correct schema (reconcile)
+- [ ] Can read documents back to Rust types (hydrate)
+- [ ] Thrustwork documents readable by pushwork (interop verified)
+- [ ] Pushwork documents readable by thrustwork (interop verified)
+- [ ] Clean up: remove `test_autosurgeon.rs`, move types to proper module
+
+**Phase 2 complete. Proceed to Phase 3 in IMPLEMENTATION_PLAN.md.**
 
 ---

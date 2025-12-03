@@ -5,6 +5,8 @@ use std::env;
 use std::str::FromStr;
 use tokio_tungstenite::connect_async;
 
+mod test_autosurgeon;
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();

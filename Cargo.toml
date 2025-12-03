@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 automerge = "0.7"
+autosurgeon = "0.10.0"
 samod = { version = "0.5", features = ["tokio", "tungstenite"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
