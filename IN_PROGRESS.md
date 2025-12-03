@@ -31,14 +31,18 @@ document, and prints its URL.
 
 Set up the basic Cargo project with required dependencies.
 
-- [ ] Update Cargo.toml with dependencies:
+- [x] Update Cargo.toml with dependencies:
   - `samod = "0.3"`
   - `automerge = "0.5"`
   - `tokio = { version = "1", features = ["full"] }`
-- [ ] Verify the project compiles with `cargo build`
+- [x] Verify the project compiles with `cargo build`
 
 **Notes:**
-<!-- Add any notes about version issues or dependency conflicts here -->
+- Using edition 2024
+- samod 0.5.1 with `tokio` and `tungstenite` features enabled
+- automerge 0.7.2 (pulled in transitively by samod)
+- tokio 1.48.0 with full features
+- Removed explicit automerge dependency - samod brings in the correct version
 
 ---
 
@@ -46,13 +50,15 @@ Set up the basic Cargo project with required dependencies.
 
 Write minimal code to create a samod Repo with in-memory storage.
 
-- [ ] Create a tokio async main function
-- [ ] Initialize a samod Repo using `Repo::build_tokio()` or equivalent
-- [ ] Use in-memory storage (no filesystem persistence yet)
-- [ ] Verify it compiles and runs without crashing
+- [x] Create a tokio async main function
+- [x] Initialize a samod Repo using `Repo::build_tokio()` or equivalent
+- [x] Use in-memory storage (no filesystem persistence yet)
+- [x] Verify it compiles and runs without crashing
 
 **Notes:**
-<!-- Document the actual samod API if it differs from expectations -->
+- `samod::Repo::build_tokio().load().await` works as documented
+- In-memory storage is the default (no explicit configuration needed)
+- Repo provides a `peer_id()` method that returns a unique peer identifier
 
 ---
 
@@ -60,12 +66,16 @@ Write minimal code to create a samod Repo with in-memory storage.
 
 Connect the repo to the public Automerge sync server.
 
-- [ ] Connect to `wss://sync3.automerge.org` via WebSocket
-- [ ] Handle connection errors gracefully (print error and exit)
-- [ ] Verify connection succeeds (no errors on startup)
+- [x] Connect to `wss://sync3.automerge.org` via WebSocket
+- [x] Handle connection errors gracefully (print error and exit)
+- [x] Verify connection succeeds (no errors on startup)
 
 **Notes:**
-<!-- Note any connection issues or API differences -->
+- Added `tokio-tungstenite` dependency with `native-tls` feature for WebSocket client
+- samod's `connect_websocket` takes an already-established stream, not a URL
+- Use `tokio_tungstenite::connect_async(url)` to establish the WebSocket
+- Then pass the stream to `repo.connect_tungstenite(ws_stream, ConnDirection::Outgoing)`
+- The connection handler must be spawned as a background task
 
 ---
 
@@ -73,14 +83,18 @@ Connect the repo to the public Automerge sync server.
 
 Create a simple document and sync it to the server.
 
-- [ ] Create a new document using the repo
-- [ ] Write a simple test value to the document (e.g., a string field)
-- [ ] Print the document's Automerge URL to stdout
-- [ ] Wait briefly for sync (e.g., 1-2 seconds)
-- [ ] Shut down cleanly
+- [x] Create a new document using the repo
+- [x] Write a simple test value to the document (e.g., a string field)
+- [x] Print the document's Automerge URL to stdout
+- [x] Wait briefly for sync (e.g., 1-2 seconds)
+- [x] Shut down cleanly
 
 **Notes:**
-<!-- Document the actual API for document creation and URL retrieval -->
+- Added `automerge = "0.7"` as direct dependency
+- Need to import `automerge::transaction::Transactable` trait to use `put()` method
+- Create document: `Automerge::new()`, then `doc.transact(|txn| { txn.put(...) })`
+- Pass to repo: `repo.create(doc).await`
+- Get URL: `doc_handle.url()` returns `AutomergeUrl` which implements Display
 
 ---
 
@@ -88,34 +102,40 @@ Create a simple document and sync it to the server.
 
 Verify that documents actually sync by reading back a document by URL.
 
-- [ ] Modify the program to optionally accept a URL as a command-line argument
-- [ ] If URL provided: find the document and print its contents
-- [ ] If no URL: create a new document (existing behavior)
-- [ ] Test by running twice: once to create, once to read back
+- [x] Modify the program to optionally accept a URL as a command-line argument
+- [x] If URL provided: find the document and print its contents
+- [x] If no URL: create a new document (existing behavior)
+- [x] Test by running twice: once to create, once to read back
 
 **Verification:**
 ```
 # First run - creates document
 $ cargo run
-Created document: automerge:abc123...
+Created document: automerge:2ss1TDGDXtYLYVu4JWVdaxeRUNaf
 
 # Second run - reads it back
-$ cargo run -- automerge:abc123...
-Document contents: { test: "value" }
+$ cargo run -- automerge:2ss1TDGDXtYLYVu4JWVdaxeRUNaf
+Found document!
+Document keys: ["test"]
+Document contents: test = Scalar(Str("hello from thrustwork"))
 ```
 
 **Notes:**
-<!-- Record whether round-trip worked, any issues encountered -->
+- Parse URL by stripping `automerge:` prefix, then `DocumentId::from_str()`
+- Use `repo.find(doc_id).await` to look up document from sync server
+- Need brief delay (1s) after connecting before `find()` to let sync protocol establish
+- Use `ReadDoc` trait to access `doc.keys()` and `doc.get()`
+- `with_document(|doc| ...)` provides access to the underlying Automerge document
 
 ---
 
 ### Phase 1 Completion Checklist
 
-- [ ] All tasks above completed
-- [ ] Can create a document and print its URL
-- [ ] Can read back a document by URL
-- [ ] Sync server connection works reliably
-- [ ] Code is clean enough to build on
+- [x] All tasks above completed
+- [x] Can create a document and print its URL
+- [x] Can read back a document by URL
+- [x] Sync server connection works reliably
+- [x] Code is clean enough to build on
 
 **Phase 1 complete. Proceed to Phase 2 in IMPLEMENTATION_PLAN.md.**
 
