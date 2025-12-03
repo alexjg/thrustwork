@@ -44,15 +44,16 @@ and root directory document.
 
 Set up proper CLI argument parsing with clap, replacing the current ad-hoc args handling.
 
-- [ ] Add `clap` dependency with derive feature
-- [ ] Define a `Cli` struct with subcommands enum
-- [ ] Add `Init` subcommand (no arguments for now)
-- [ ] Keep existing `create-test` and `read-dir` as subcommands for testing
-- [ ] Update `main()` to use clap parsing
+- [x] Add `clap` dependency with derive feature
+- [x] Define a `Cli` struct with subcommands enum
+- [x] Add `Init` subcommand (no arguments for now)
+- [x] Keep existing `create-test` and `read-dir` as subcommands for testing
+- [x] Update `main()` to use clap parsing
 
 **Notes:**
-- Use `#[derive(Parser)]` for the main struct
-- Use `#[derive(Subcommand)]` for the commands enum
+- Used `#[derive(Parser)]` for the main struct
+- Used `#[derive(Subcommand)]` for the commands enum
+- Commands: `init`, `create-test`, `read-dir <url>`
 
 ---
 

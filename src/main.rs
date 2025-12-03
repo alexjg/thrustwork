@@ -1,7 +1,7 @@
-use automerge::{Automerge, ReadDoc};
+use automerge::Automerge;
 use autosurgeon::{hydrate, reconcile};
+use clap::{Parser, Subcommand};
 use samod::{ConnDirection, DocumentId, Repo};
-use std::env;
 use std::str::FromStr;
 use tokio_tungstenite::connect_async;
 
@@ -10,6 +10,29 @@ mod documents;
 use documents::{DirectoryDocument, DirectoryEntry, FileDocument};
 
 const SYNC_SERVER_URL: &str = "wss://sync3.automerge.org";
+
+#[derive(Parser)]
+#[command(name = "thrustwork")]
+#[command(about = "A Rust implementation of pushwork - sync files via Automerge")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Initialize a new thrustwork directory
+    Init,
+
+    /// Create test file+directory for pushwork interop testing
+    CreateTest,
+
+    /// Read a pushwork directory and its files
+    ReadDir {
+        /// Automerge URL of the directory document
+        url: String,
+    },
+}
 
 /// Connect to the sync server and return the repo
 async fn connect_to_sync_server(repo: &Repo) {
@@ -157,53 +180,36 @@ async fn read_dir(repo: &Repo, url: &str) {
     }
 }
 
-fn print_usage() {
-    eprintln!("Usage: thrustwork <command> [args]");
-    eprintln!();
-    eprintln!("Commands:");
-    eprintln!("  create-test              Create test file+directory for pushwork interop");
-    eprintln!("  read-dir <url>           Read a pushwork directory and its files");
-    eprintln!("  read <url>               Read a simple document (legacy)");
-    eprintln!();
-    eprintln!("Examples:");
-    eprintln!("  thrustwork create-test");
-    eprintln!("  thrustwork read-dir automerge:abc123");
-}
-
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    if args.len() < 2 {
-        print_usage();
-        std::process::exit(1);
-    }
+    match cli.command {
+        Commands::Init => {
+            // TODO: Implement in Task 3.5
+            println!("Init command not yet implemented");
+        }
+        Commands::CreateTest => {
+            // Initialize a samod Repo with in-memory storage
+            let repo = samod::Repo::build_tokio().load().await;
+            println!("Repo initialized (peer ID: {})", repo.peer_id());
 
-    // Initialize a samod Repo with in-memory storage
-    let repo = samod::Repo::build_tokio().load().await;
-    println!("Repo initialized (peer ID: {})", repo.peer_id());
+            // Connect to sync server
+            connect_to_sync_server(&repo).await;
 
-    // Connect to sync server
-    connect_to_sync_server(&repo).await;
-
-    match args[1].as_str() {
-        "create-test" => {
             create_test(&repo).await;
+            println!("\nDone!");
         }
-        "read-dir" => {
-            if args.len() < 3 {
-                eprintln!("Error: read-dir requires a URL argument");
-                print_usage();
-                std::process::exit(1);
-            }
-            read_dir(&repo, &args[2]).await;
-        }
-        _ => {
-            eprintln!("Unknown command: {}", args[1]);
-            print_usage();
-            std::process::exit(1);
+        Commands::ReadDir { url } => {
+            // Initialize a samod Repo with in-memory storage
+            let repo = samod::Repo::build_tokio().load().await;
+            println!("Repo initialized (peer ID: {})", repo.peer_id());
+
+            // Connect to sync server
+            connect_to_sync_server(&repo).await;
+
+            read_dir(&repo, &url).await;
+            println!("\nDone!");
         }
     }
-
-    println!("\nDone!");
 }
