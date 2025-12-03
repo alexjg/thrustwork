@@ -30,3 +30,138 @@ The overall design we are working on is described in DESIGN.md and the separate 
 - `lastSyncAt` may be absent, use `#[autosurgeon(missing = "Default::default")]`
 
 ---
+
+## Phase 3: Initialize a Directory
+
+**Goal**: Implement the `init` command to set up a directory for syncing.
+
+**Deliverable**: `thrustwork init` creates the `.pushwork` folder, config file,
+and root directory document.
+
+---
+
+### Task 3.1: Add clap for CLI Parsing
+
+Set up proper CLI argument parsing with clap, replacing the current ad-hoc args handling.
+
+- [ ] Add `clap` dependency with derive feature
+- [ ] Define a `Cli` struct with subcommands enum
+- [ ] Add `Init` subcommand (no arguments for now)
+- [ ] Keep existing `create-test` and `read-dir` as subcommands for testing
+- [ ] Update `main()` to use clap parsing
+
+**Notes:**
+- Use `#[derive(Parser)]` for the main struct
+- Use `#[derive(Subcommand)]` for the commands enum
+
+---
+
+### Task 3.2: Define Config Structure
+
+Create the configuration types that will be saved to `.pushwork/config.json`.
+
+- [ ] Create a `config` module
+- [ ] Define `DirectoryConfig` struct with serde derives:
+  - `root_directory_url: Option<String>` (set after creating root doc)
+  - `sync_server: String` (default: "wss://sync3.automerge.org")
+  - `exclude_patterns: Vec<String>` (default: common patterns)
+- [ ] Implement `Default` for `DirectoryConfig`
+- [ ] Add functions to load/save config from/to JSON file
+
+**Notes:**
+- Match pushwork's config structure for compatibility
+- Default exclude patterns: `.pushwork`, `.git`, `node_modules`, etc.
+
+---
+
+### Task 3.3: Create .pushwork Directory Structure
+
+Implement the directory initialization logic.
+
+- [ ] Create a function `init_directory(path: &Path) -> Result<()>`
+- [ ] Create `.pushwork/` directory
+- [ ] Create `.pushwork/automerge/` for repo storage
+- [ ] Handle error if `.pushwork` already exists (with --force option later)
+- [ ] Write initial config file (without root URL yet)
+
+**Notes:**
+- Use `std::fs` for directory/file operations
+- Return descriptive errors for common failure cases
+
+---
+
+### Task 3.4: Create Root Directory Document
+
+Create the root directory document and update config with its URL.
+
+- [ ] Initialize samod Repo with filesystem storage in `.pushwork/automerge/`
+- [ ] Connect to sync server
+- [ ] Create empty `DirectoryDocument`
+- [ ] Reconcile to a new Automerge document
+- [ ] Create document in repo and get URL
+- [ ] Update config file with `root_directory_url`
+- [ ] Wait for sync to complete
+
+**Notes:**
+- Use `samod::Repo::build_tokio().fs_storage(path).load().await`
+- The root directory should have empty `docs` array initially
+
+---
+
+### Task 3.5: Implement init Subcommand
+
+Wire up the init command to use the initialization logic.
+
+- [ ] Implement `init` command handler
+- [ ] Get current working directory (or accept path argument)
+- [ ] Check if already initialized (`.pushwork` exists)
+- [ ] Call initialization functions
+- [ ] Print success message with root URL
+
+**Notes:**
+- Print helpful error if already initialized
+- Show the URL so user can share it
+
+---
+
+### Task 3.6: Interop Verification
+
+Verify the initialized directory works with pushwork.
+
+- [ ] Run `thrustwork init` in a test directory
+- [ ] Verify `.pushwork/config.json` exists and contains valid URL
+- [ ] Run `pushwork clone <url>` in another directory
+- [ ] Verify pushwork sees an empty directory
+- [ ] Optionally: run `pushwork status` to verify it recognizes the directory
+
+**Verification:**
+```
+$ mkdir /tmp/test-init && cd /tmp/test-init
+$ thrustwork init
+Initialized thrustwork directory
+Root URL: automerge:xxx
+
+$ mkdir /tmp/test-clone && cd /tmp/test-clone
+$ pushwork clone automerge:xxx
+$ ls -la
+(should show empty directory with .pushwork)
+```
+
+**Notes:**
+- This is a manual integration test
+- Record any compatibility issues discovered
+
+---
+
+### Phase 3 Completion Checklist
+
+- [ ] clap CLI parsing implemented
+- [ ] Config structure defined and can be saved/loaded
+- [ ] `.pushwork/` directory structure created correctly
+- [ ] Root directory document created and synced
+- [ ] `thrustwork init` command works end-to-end
+- [ ] Pushwork can clone the initialized directory
+
+**Phase 3 complete. Proceed to Phase 4 in IMPLEMENTATION_PLAN.md.**
+
+---
