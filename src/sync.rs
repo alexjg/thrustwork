@@ -46,6 +46,10 @@ pub async fn execute(paths: &PushworkPaths, config: &DirectoryConfig, repo: &Rep
     // Load or create snapshot
     let mut snapshot = load_or_create_snapshot(paths, &root_url);
 
+    // Pre-load all tracked documents and wait for sync from server
+    // This ensures we have the latest state before checking for changes
+    preload_tracked_documents(repo, &snapshot, conn_id).await;
+
     // Scan for new files
     let scan_result =
         scanner::scan_for_changes(&paths.root, &config.exclude_patterns, &snapshot)
@@ -453,6 +457,39 @@ fn load_or_create_snapshot(paths: &PushworkPaths, root_url: &AutomergeUrl) -> Sn
     } else {
         Snapshot::new(paths.root.clone(), Some(root_url.clone()))
     }
+}
+
+/// Pre-load all tracked documents and wait for sync from the server
+///
+/// When we call repo.find() on a document that exists locally, it returns
+/// immediately but syncs in the background. This function loads all tracked
+/// documents and waits for each to receive all changes from the server.
+async fn preload_tracked_documents(repo: &Repo, snapshot: &Snapshot, conn_id: ConnectionId) {
+    if snapshot.files.is_empty() {
+        return;
+    }
+
+    // Load all tracked documents in parallel
+    let futures: Vec<_> = snapshot
+        .files
+        .iter()
+        .map(|(_, entry)| repo.find(entry.url.doc_id().clone()))
+        .collect();
+
+    let handles: Vec<_> = futures::future::join_all(futures)
+        .await
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect();
+
+    // Wait for all documents to receive changes from the server
+    let sync_futures: Vec<_> = handles
+        .iter()
+        .map(|h| h.we_have_their_changes(conn_id))
+        .collect();
+
+    futures::future::join_all(sync_futures).await;
 }
 
 /// Print sync summary

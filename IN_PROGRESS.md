@@ -155,46 +155,37 @@ Detect and handle files changed both locally and remotely.
 
 Test the full remote change flow.
 
-- [ ] Set up two directories syncing the same root
-- [ ] Modify a file in directory A, sync
-- [ ] Sync in directory B, verify file is updated
-- [ ] Test with both text and binary files
+- [x] Set up two directories syncing the same root
+- [x] Modify a file in directory A, sync
+- [x] Sync in directory B, verify file is updated
+- [x] Test CRDT merge when both clients modify same file
+- [x] Test with binary files
 
-**Verification:**
-```
-# Terminal 1: Create and sync
-mkdir /tmp/client-a && cd /tmp/client-a
-thrustwork init
-echo "original" > test.txt
-thrustwork sync
-# Note the root URL
+**Verification Results:**
+1. Push new file (client-a): PASSED
+2. Clone pulls files (client-b): PASSED
+3. Push modified file (client-a): PASSED
+4. Pull remote change (client-b): PASSED - Added `preload_tracked_documents()`
+   to wait for sync before checking for remote changes
+5. CRDT merge conflict (both changed): PASSED - Both local and remote changes
+   merged correctly using fork-and-merge approach
+6. Binary file push (client-a): PASSED
 
-# Terminal 2: Clone
-mkdir /tmp/client-b && cd /tmp/client-b
-thrustwork clone <url>
-cat test.txt  # Should show "original"
-
-# Terminal 1: Modify and sync
-echo "modified by A" > test.txt
-thrustwork sync
-
-# Terminal 2: Pull changes
-thrustwork sync
-cat test.txt  # Should show "modified by A"
-```
+**Note:** Detecting new remote files (not in snapshot) requires checking the
+directory document - this is a future enhancement for directory sync.
 
 ---
 
 ### Phase 8 Completion Checklist
 
-- [ ] Remote changes detected by comparing document heads to snapshot
-- [ ] Remote file content can be read from documents
-- [ ] Remote changes are written to local filesystem
-- [ ] Sync command pulls remote changes after pushing local
-- [ ] BOTH_CHANGED scenario handled (remote wins for now)
-- [ ] Two-client sync verified working
+- [x] Remote changes detected by comparing document heads to snapshot
+- [x] Remote file content can be read from documents
+- [x] Remote changes are written to local filesystem
+- [x] Sync command pulls remote changes after pushing local
+- [x] BOTH_CHANGED scenario handled with CRDT merge
+- [x] Two-client sync verified working
 
-**Phase 8 complete when all items checked. Proceed to Phase 9.**
+**Phase 8 complete. Proceed to Phase 9.**
 
 ---
 
