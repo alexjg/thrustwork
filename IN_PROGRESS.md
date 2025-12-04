@@ -44,15 +44,17 @@ pushes it to the remote.
 
 Add the `sync` command to the CLI with basic structure.
 
-- [ ] Add `Sync` variant to `Commands` enum
-- [ ] Add basic handler that finds the `.pushwork` directory
-- [ ] Load the config to get the root directory URL
-- [ ] Connect to sync server and load the root directory document
-- [ ] Print basic status (e.g., "Syncing directory: <path>")
+- [x] Add `Sync` variant to `Commands` enum
+- [x] Add basic handler that finds the `.pushwork` directory
+- [x] Load the config to get the root directory URL
+- [x] Connect to sync server and load the root directory document
+- [x] Print basic status (e.g., "Syncing directory: <path>")
 
 **Notes:**
-- This is just the skeleton - actual sync logic comes later
-- Need to walk up from cwd to find `.pushwork` (like git finds `.git`)
+- Added `PushworkPaths::find_from()` to walk up from cwd to find `.pushwork`
+- Sync command loads config, connects to sync server, loads root directory document
+- Uses `TokioFilesystemStorage` to persist documents locally
+- 15 tests passing (including new `test_find_from`)
 
 ---
 

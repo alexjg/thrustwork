@@ -91,6 +91,22 @@ impl PushworkPaths {
     pub fn is_initialized(&self) -> bool {
         self.pushwork_dir.exists()
     }
+
+    /// Find a .pushwork directory by walking up from the given path.
+    ///
+    /// Returns `Some(PushworkPaths)` if found, `None` if we reach the root without finding it.
+    pub fn find_from(start: &Path) -> Option<Self> {
+        let mut current = start.to_path_buf();
+        loop {
+            let paths = Self::new(&current);
+            if paths.is_initialized() {
+                return Some(paths);
+            }
+            if !current.pop() {
+                return None;
+            }
+        }
+    }
 }
 
 /// Create the .pushwork directory structure
@@ -276,5 +292,34 @@ mod tests {
         create_directory_structure(root, false).unwrap();
 
         assert!(paths.is_initialized());
+    }
+
+    #[test]
+    fn test_find_from() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Not initialized - should return None
+        assert!(PushworkPaths::find_from(root).is_none());
+
+        // Initialize and try again
+        create_directory_structure(root, false).unwrap();
+        let found = PushworkPaths::find_from(root);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().root, root);
+
+        // Create a subdirectory and search from there
+        let subdir = root.join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        let found = PushworkPaths::find_from(&subdir);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().root, root);
+
+        // Create a nested subdirectory
+        let nested = subdir.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let found = PushworkPaths::find_from(&nested);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().root, root);
     }
 }

@@ -1,7 +1,7 @@
 use automerge::Automerge;
 use autosurgeon::{hydrate, reconcile};
 use clap::{Parser, Subcommand};
-use samod::{ConnDirection, DocumentId, Repo};
+use samod::{storage::TokioFilesystemStorage, ConnDirection, DocumentId, Repo};
 use std::str::FromStr;
 use tokio_tungstenite::connect_async;
 
@@ -25,6 +25,9 @@ struct Cli {
 enum Commands {
     /// Initialize a new thrustwork directory
     Init,
+
+    /// Sync local changes with the remote
+    Sync,
 
     /// Create test file+directory for pushwork interop testing
     CreateTest,
@@ -235,6 +238,77 @@ async fn main() {
             println!("\nInitialized thrustwork directory");
             println!("Root URL: {}", root_url);
             println!("\nShare this URL to allow others to sync with this directory.");
+        }
+        Commands::Sync => {
+            // Find the .pushwork directory
+            let cwd = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("Failed to get current directory: {}", e);
+                std::process::exit(1);
+            });
+
+            let paths = init::PushworkPaths::find_from(&cwd).unwrap_or_else(|| {
+                eprintln!("Not in a thrustwork directory (no .pushwork found)");
+                eprintln!("Run 'thrustwork init' to initialize this directory.");
+                std::process::exit(1);
+            });
+
+            println!("Syncing directory: {:?}", paths.root);
+
+            // Load the config
+            let config = config::DirectoryConfig::load(&paths.config_file).unwrap_or_else(|e| {
+                eprintln!("Failed to load config: {}", e);
+                std::process::exit(1);
+            });
+
+            let root_url = config.root_directory_url.as_ref().unwrap_or_else(|| {
+                eprintln!("No root directory URL in config - directory not properly initialized");
+                std::process::exit(1);
+            });
+
+            // Initialize repo with filesystem storage
+            let storage = TokioFilesystemStorage::new(&paths.automerge_dir);
+            let repo = Repo::build_tokio().with_storage(storage).load().await;
+
+            // Connect to sync server
+            let sync_url = config.sync_server_url();
+            let (ws_stream, _response) = connect_async(sync_url).await.unwrap_or_else(|e| {
+                eprintln!("Failed to connect to sync server: {}", e);
+                std::process::exit(1);
+            });
+
+            let conn = repo
+                .connect_tungstenite(ws_stream, ConnDirection::Outgoing)
+                .unwrap_or_else(|_| {
+                    eprintln!("Failed to set up connection: repo stopped");
+                    std::process::exit(1);
+                });
+
+            conn.handshake_complete().await.unwrap_or_else(|_| {
+                eprintln!("Connection handshake failed");
+                std::process::exit(1);
+            });
+
+            // Load the root directory document
+            let doc_id_str = root_url
+                .strip_prefix("automerge:")
+                .expect("URL must start with 'automerge:'");
+            let doc_id = DocumentId::from_str(doc_id_str).expect("Invalid document ID");
+
+            let dir_handle = repo
+                .find(doc_id)
+                .await
+                .expect("Repo stopped")
+                .unwrap_or_else(|| {
+                    eprintln!("Root directory document not found");
+                    std::process::exit(1);
+                });
+
+            let dir: DirectoryDocument = dir_handle.with_document(|doc| {
+                hydrate(doc).expect("Failed to hydrate directory document")
+            });
+
+            println!("Root directory loaded ({} entries)", dir.docs.len());
+            println!("\nSync not yet implemented - this is just the skeleton.");
         }
         Commands::CreateTest => {
             // Initialize a samod Repo with in-memory storage
