@@ -5,6 +5,7 @@ use samod::{storage::TokioFilesystemStorage, AutomergeUrl, ConnDirection, DocHan
 use std::str::FromStr;
 use tokio_tungstenite::connect_async;
 
+mod clone;
 mod config;
 mod documents;
 mod files;
@@ -33,6 +34,12 @@ enum Commands {
 
     /// Sync local changes with the remote
     Sync,
+
+    /// Clone a remote pushwork directory
+    Clone {
+        /// Automerge URL of the directory to clone
+        url: String,
+    },
 
     /// Create test file+directory for pushwork interop testing
     CreateTest,
@@ -459,6 +466,69 @@ async fn main() {
 
             read_dir(&repo, &url).await;
             println!("\nDone!");
+        }
+        Commands::Clone { url } => {
+            println!("Cloning from: {}", url);
+
+            // Get the current working directory
+            let cwd = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("Failed to get current directory: {}", e);
+                std::process::exit(1);
+            });
+
+            // Check if already initialized
+            let paths = init::PushworkPaths::new(&cwd);
+            if paths.is_initialized() {
+                eprintln!("Directory is already initialized. Cannot clone into an existing thrustwork directory.");
+                std::process::exit(1);
+            }
+
+            // Create the .pushwork directory structure
+            println!("Creating .pushwork directory...");
+            let (paths, _config) =
+                init::create_directory_structure(&cwd, false).unwrap_or_else(|e| {
+                    eprintln!("Failed to create directory structure: {}", e);
+                    std::process::exit(1);
+                });
+
+            // Initialize repo with filesystem storage
+            let storage = TokioFilesystemStorage::new(&paths.automerge_dir);
+            let repo = Repo::build_tokio().with_storage(storage).load().await;
+
+            // Connect to sync server
+            println!("Connecting to sync server: {}", SYNC_SERVER_URL);
+            let (ws_stream, _response) = connect_async(SYNC_SERVER_URL).await.unwrap_or_else(|e| {
+                eprintln!("Failed to connect to sync server: {}", e);
+                std::process::exit(1);
+            });
+
+            let conn = repo
+                .connect_tungstenite(ws_stream, ConnDirection::Outgoing)
+                .unwrap_or_else(|_| {
+                    eprintln!("Failed to set up connection: repo stopped");
+                    std::process::exit(1);
+                });
+
+            conn.handshake_complete().await.unwrap_or_else(|_| {
+                eprintln!("Connection handshake failed");
+                std::process::exit(1);
+            });
+
+            println!("Connected to sync server");
+
+            // Execute the clone operation
+            match clone::execute_clone(&repo, &url, cwd, paths).await {
+                Ok(result) => {
+                    println!("\nDone! {} file(s) cloned.", result.files_cloned);
+                    if result.files_skipped > 0 {
+                        println!("{} file(s) skipped due to errors.", result.files_skipped);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Clone failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }
