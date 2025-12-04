@@ -8,6 +8,7 @@ use tokio_tungstenite::connect_async;
 mod config;
 mod documents;
 mod init;
+mod snapshot;
 
 use documents::{DirectoryDocument, DirectoryEntry, FileDocument};
 

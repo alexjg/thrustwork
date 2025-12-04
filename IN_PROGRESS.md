@@ -62,21 +62,26 @@ Add the `sync` command to the CLI with basic structure.
 
 Create the snapshot types for tracking sync state.
 
-- [ ] Create `snapshot` module
-- [ ] Define `Snapshot` struct with serde derives:
+- [x] Create `snapshot` module
+- [x] Define `Snapshot` struct with serde derives:
   - `timestamp: u64`
   - `root_path: PathBuf`
   - `root_directory_url: Option<String>`
   - `files: Vec<FileEntry>`
   - `directories: Vec<DirectoryEntry>`
-- [ ] Define `FileEntry` struct (path, url, head, extension, mime_type)
-- [ ] Define `DirectoryEntry` struct (path, url, head)
-- [ ] Add load/save functions for `.pushwork/snapshot.json`
-- [ ] Add tests for serialization roundtrip
+- [x] Define `FileEntry` struct (path, url, head, extension, mime_type)
+- [x] Define `DirectoryEntry` struct (path, url, head)
+- [x] Add load/save functions for `.pushwork/snapshot.json`
+- [x] Add tests for serialization roundtrip
 
 **Notes:**
-- Match pushwork's snapshot format for compatibility
-- `head` is a Vec<String> of hex-encoded change hashes
+- Created `src/snapshot.rs` with `Snapshot`, `SnapshotFileEntry`, `SnapshotDirectoryEntry`
+- Uses `#[serde(rename_all = "camelCase")]` for pushwork compatibility
+- Files and directories stored as `Vec<(String, Entry)>` tuples (relative path, entry)
+- Added helper methods: `add_file`, `add_directory`, `get_file`, `get_directory`
+- `head` fields use `Vec<ChangeHash>` with custom serde module for hex serialization
+- `url` fields use `samod::AutomergeUrl` with custom serde module for string serialization
+- 21 tests passing (6 new snapshot tests)
 
 ---
 
