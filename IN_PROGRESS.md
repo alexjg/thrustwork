@@ -177,14 +177,18 @@ updating binary documents.
 
 Support cloning/pulling binary files from remote.
 
-- [ ] Update clone module to handle binary file documents
-- [ ] Write binary content to disk (not as UTF-8 string)
-- [ ] Ensure file permissions are set correctly
-- [ ] Add tests for cloning binary files
+- [x] Update clone module to handle binary file documents
+- [x] Write binary content to disk (not as UTF-8 string)
+- [x] Ensure file permissions are set correctly
+- [ ] Add tests for cloning binary files (deferred - requires integration test)
 
 **Notes:**
 - Currently clone writes with `fs::write()` which works for both text and binary
 - Need to extract bytes from ByteVec content
+
+**Implementation:** Changed `LoadedFile.content` from `String` to `Vec<u8>` and
+updated `load_single_file()` to use `content_bytes()`. The `write_files_to_disk()`
+function already used `std::fs::write()` which accepts `&[u8]`, so no changes needed there.
 
 ---
 
@@ -192,14 +196,22 @@ Support cloning/pulling binary files from remote.
 
 Remove binary file skipping and enable full binary support.
 
-- [ ] Remove "Skipping (binary)" logic from sync module
-- [ ] Update change detection to work with binary files
-- [ ] Ensure snapshot tracks binary files correctly
-- [ ] Test end-to-end binary file sync
+- [x] Remove "Skipping (binary)" logic from sync module
+- [x] Update change detection to work with binary files
+- [x] Ensure snapshot tracks binary files correctly
+- [ ] Test end-to-end binary file sync (deferred to Task 7.7)
 
 **Notes:**
 - The `FileInfo.is_text` field is still useful for choosing content type
 - But we no longer skip binary files
+
+**Implementation:**
+- Removed binary file skipping from `process_new_files()` in sync.rs
+- Changed `ModifiedFile.new_content` from `String` to `Vec<u8>`
+- Changed `get_file_content_at_heads()` to return `Vec<u8>` instead of `String`
+- Updated `detect_modified_files()` to use `std::fs::read()` for byte comparison
+- Updated `process_modified_files()` to use `FileContent::text()` or `FileContent::binary()`
+  based on MIME type
 
 ---
 

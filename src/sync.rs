@@ -151,17 +151,10 @@ struct ModifiedFilesResult {
 /// Process new files: create documents for each
 async fn process_new_files(repo: &Repo, new_files: &[FileToSync]) -> NewFilesResult {
     let mut created = Vec::new();
-    let mut skipped = 0;
 
     for file in new_files {
-        // Skip binary files
-        if !file.info.is_text {
-            println!("  Skipping (binary): {}", file.relative_path);
-            skipped += 1;
-            continue;
-        }
-
-        println!("  Pushing: {}", file.relative_path);
+        let file_type = if file.info.is_text { "text" } else { "binary" };
+        println!("  Pushing ({}): {}", file_type, file.relative_path);
 
         match sync_ops::create_file_document(repo, &file.absolute_path, &file.info).await {
             Ok(result) => {
@@ -181,7 +174,7 @@ async fn process_new_files(repo: &Repo, new_files: &[FileToSync]) -> NewFilesRes
         }
     }
 
-    NewFilesResult { created, skipped }
+    NewFilesResult { created, skipped: 0 }
 }
 
 /// Process modified files: update their documents
@@ -213,8 +206,13 @@ async fn process_modified_files(
             .ok()
             .map(|p| p as i64);
 
-        // Update the document (currently text only - binary handled in later phase)
-        let content = FileContent::text(&modified.new_content);
+        // Determine if file is text or binary based on MIME type
+        let is_text = files::is_text_mime_type(&modified.snapshot_entry.mime_type);
+        let content = if is_text {
+            FileContent::text(String::from_utf8_lossy(&modified.new_content))
+        } else {
+            FileContent::binary(modified.new_content.clone())
+        };
         match sync_ops::update_file_document(&handle, content, new_perms) {
             Ok(new_heads) => {
                 entries.push((modified.relative_path.clone(), new_heads));
@@ -371,9 +369,8 @@ fn print_summary(new_count: usize, modified_count: usize, skipped_count: usize) 
     if modified_count > 0 {
         parts.push(format!("{} modified", modified_count));
     }
-    if skipped_count > 0 {
-        parts.push(format!("{} skipped (binary)", skipped_count));
-    }
+    // skipped_count is now always 0 since we support binary files
+    let _ = skipped_count;
 
     println!(
         "\nDone! {} file(s) synced ({}).",

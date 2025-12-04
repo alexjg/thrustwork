@@ -182,10 +182,11 @@ pub fn get_document_heads(handle: &DocHandle) -> Vec<ChangeHash> {
 ///
 /// This forks the document at the given heads and extracts the content,
 /// allowing comparison against the current local file content.
+/// Returns raw bytes which works for both text and binary files.
 pub fn get_file_content_at_heads(
     handle: &DocHandle,
     heads: &[ChangeHash],
-) -> Result<String, SyncError> {
+) -> Result<Vec<u8>, SyncError> {
     handle.with_document(|doc| {
         // Fork the document at the specified heads
         let forked = doc
@@ -196,7 +197,7 @@ pub fn get_file_content_at_heads(
         let file_doc: FileDocument =
             hydrate(&forked).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
 
-        Ok(file_doc.content_string())
+        Ok(file_doc.content_bytes().to_vec())
     })
 }
 
@@ -418,9 +419,9 @@ mod tests {
         // Get heads after creation
         let initial_heads = get_document_heads(&created.handle);
 
-        // Verify we can read content at those heads
+        // Verify we can read content at those heads (now returns bytes)
         let content = get_file_content_at_heads(&created.handle, &initial_heads).unwrap();
-        assert_eq!(content, "Original content");
+        assert_eq!(content, b"Original content");
 
         // Now update the document with new content
         created.handle.with_document(|doc| {
@@ -440,7 +441,7 @@ mod tests {
 
         // But content at original heads should still be original
         let old_content = get_file_content_at_heads(&created.handle, &initial_heads).unwrap();
-        assert_eq!(old_content, "Original content");
+        assert_eq!(old_content, b"Original content");
     }
 
     #[tokio::test]

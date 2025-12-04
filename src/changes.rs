@@ -4,7 +4,6 @@ use std::path::Path;
 
 use samod::Repo;
 
-use crate::files::read_text_file;
 use crate::snapshot::{Snapshot, SnapshotFileEntry};
 use crate::sync_ops::get_file_content_at_heads;
 
@@ -15,8 +14,8 @@ pub struct ModifiedFile {
     pub relative_path: String,
     /// The snapshot entry for this file
     pub snapshot_entry: SnapshotFileEntry,
-    /// The new content from disk
-    pub new_content: String,
+    /// The new content from disk (raw bytes - works for text and binary)
+    pub new_content: Vec<u8>,
 }
 
 /// Detect files that have been modified locally since the last sync
@@ -39,8 +38,8 @@ pub async fn detect_modified_files(
             continue;
         }
 
-        // Read current content from disk
-        let disk_content = match read_text_file(&absolute_path) {
+        // Read current content from disk (as bytes - works for text and binary)
+        let disk_content = match std::fs::read(&absolute_path) {
             Ok(content) => content,
             Err(_) => {
                 // Can't read file - skip for now
@@ -59,7 +58,7 @@ pub async fn detect_modified_files(
             Err(_) => continue,
         };
 
-        // Compare content
+        // Compare content (byte-level comparison works for both text and binary)
         if disk_content != snapshot_content {
             modified.push(ModifiedFile {
                 relative_path: relative_path.clone(),
@@ -132,7 +131,7 @@ mod tests {
         let modified = detect_modified_files(&repo, root, &snapshot).await;
         assert_eq!(modified.len(), 1);
         assert_eq!(modified[0].relative_path, "test.txt");
-        assert_eq!(modified[0].new_content, "Modified content");
+        assert_eq!(modified[0].new_content, b"Modified content");
     }
 
     #[tokio::test]

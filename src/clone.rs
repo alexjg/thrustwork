@@ -269,7 +269,7 @@ async fn load_single_file(repo: &Repo, file: &FileToClone) -> Option<LoadedFile>
 
     Some(LoadedFile {
         name: file.name.clone(),
-        content: file_doc.content_string(),
+        content: file_doc.content_bytes().to_vec(),
         permissions: file_doc.metadata.permissions,
         extension: file_doc.extension_str().to_string(),
         mime_type: file_doc.mime_type_str().to_string(),
@@ -292,7 +292,8 @@ struct FileToClone {
 /// A file that has been loaded from the remote
 struct LoadedFile {
     name: String,
-    content: String,
+    /// Raw bytes - works for both text and binary files
+    content: Vec<u8>,
     permissions: i64,
     extension: String,
     mime_type: String,
