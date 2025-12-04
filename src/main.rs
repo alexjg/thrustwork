@@ -200,8 +200,41 @@ async fn main() {
 
     match cli.command {
         Commands::Init => {
-            // TODO: Implement in Task 3.5
-            println!("Init command not yet implemented");
+            // Get the current working directory
+            let cwd = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("Failed to get current directory: {}", e);
+                std::process::exit(1);
+            });
+
+            // Check if already initialized
+            let paths = init::PushworkPaths::new(&cwd);
+            if paths.is_initialized() {
+                eprintln!(
+                    "Directory is already initialized (use --force to reinitialize)"
+                );
+                std::process::exit(1);
+            }
+
+            // Create the directory structure
+            println!("Initializing thrustwork in {:?}...", cwd);
+            let (paths, mut config) =
+                init::create_directory_structure(&cwd, false).unwrap_or_else(|e| {
+                    eprintln!("Failed to initialize directory: {}", e);
+                    std::process::exit(1);
+                });
+
+            // Create the root directory document and sync it
+            println!("Creating root directory document...");
+            let root_url = init::create_root_document(&paths, &mut config)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Failed to create root document: {}", e);
+                    std::process::exit(1);
+                });
+
+            println!("\nInitialized thrustwork directory");
+            println!("Root URL: {}", root_url);
+            println!("\nShare this URL to allow others to sync with this directory.");
         }
         Commands::CreateTest => {
             // Initialize a samod Repo with in-memory storage
