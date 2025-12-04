@@ -48,15 +48,19 @@ The overall design we are working on is described in DESIGN.md and the separate 
 
 Compare document heads against snapshot heads to find files changed remotely.
 
-- [ ] Add function to compare current document heads with snapshot heads
-- [ ] Return list of files where document has newer heads than snapshot
-- [ ] Handle case where document heads are the same (no change)
-- [ ] Handle case where document heads are different (remote change)
+- [x] Add function to compare current document heads with snapshot heads
+- [x] Return list of files where document has newer heads than snapshot
+- [x] Handle case where document heads are the same (no change)
+- [x] Handle case where document heads are different (remote change)
 
 **Notes:**
 - A file has remote changes if `doc.get_heads() != snapshot_entry.head`
 - This is the inverse of local change detection (which compares disk content)
 - Need to load each tracked document and check its heads
+
+**Implementation:** Added `RemotelyChangedFile` struct and `detect_remote_changes()`
+function in `changes.rs`. The function iterates through snapshot files, loads each
+document, and compares heads. Returns files where heads differ.
 
 ---
 
