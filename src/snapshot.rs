@@ -247,6 +247,19 @@ impl Snapshot {
             .map(|(_, e)| e)
     }
 
+    /// Update the heads for an existing file entry
+    ///
+    /// Returns true if the file was found and updated, false if not found.
+    pub fn update_file_heads(&mut self, relative_path: &str, new_heads: Vec<ChangeHash>) -> bool {
+        for (path, entry) in &mut self.files {
+            if path == relative_path {
+                entry.head = new_heads;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Get a directory entry by relative path
     pub fn get_directory(&self, relative_path: &str) -> Option<&SnapshotDirectoryEntry> {
         self.directories
@@ -440,5 +453,42 @@ mod tests {
         assert!(json.contains("\"rootDirectoryUrl\""));
         assert!(!json.contains("\"root_path\""));
         assert!(!json.contains("\"root_directory_url\""));
+    }
+
+    #[test]
+    fn test_update_file_heads() {
+        let mut snapshot = Snapshot::new(PathBuf::from("/tmp/test"), None);
+
+        snapshot.add_file(
+            "test.txt".to_string(),
+            SnapshotFileEntry {
+                path: PathBuf::from("/tmp/test/test.txt"),
+                url: test_url(UUID_A),
+                head: vec![test_hash(HASH_A)],
+                extension: "txt".to_string(),
+                mime_type: "text/plain".to_string(),
+            },
+        );
+
+        // Update heads
+        let updated = snapshot.update_file_heads("test.txt", vec![test_hash(HASH_B)]);
+        assert!(updated);
+
+        // Verify heads changed
+        let entry = snapshot.get_file("test.txt").unwrap();
+        assert_eq!(entry.head, vec![test_hash(HASH_B)]);
+
+        // URL and other fields should be unchanged
+        assert_eq!(entry.url.to_string(), test_url(UUID_A).to_string());
+        assert_eq!(entry.extension, "txt");
+    }
+
+    #[test]
+    fn test_update_file_heads_not_found() {
+        let mut snapshot = Snapshot::new(PathBuf::from("/tmp/test"), None);
+
+        // Try to update a file that doesn't exist
+        let updated = snapshot.update_file_heads("nonexistent.txt", vec![test_hash(HASH_A)]);
+        assert!(!updated);
     }
 }

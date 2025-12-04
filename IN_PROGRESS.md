@@ -92,9 +92,9 @@ Update a file document with new local content.
 
 Update snapshot with new document heads after pushing changes.
 
-- [ ] After updating document, get new heads
-- [ ] Update the file's entry in snapshot with new heads
-- [ ] Save snapshot to disk
+- [x] After updating document, get new heads
+- [x] Update the file's entry in snapshot with new heads
+- [x] Save snapshot to disk
 
 **Notes:**
 - The snapshot must reflect the new state after sync
