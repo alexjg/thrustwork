@@ -170,14 +170,16 @@ Add the new file entry to the root directory.
 
 Update the snapshot file with the new file entry.
 
-- [ ] Create or load existing snapshot
-- [ ] Add `FileEntry` for the new file (path, url, heads)
-- [ ] Update timestamp
-- [ ] Save snapshot to `.pushwork/snapshot.json`
+- [x] Create or load existing snapshot
+- [x] Add `FileEntry` for the new file (path, url, heads)
+- [x] Update timestamp
+- [x] Save snapshot to `.pushwork/snapshot.json`
 
 **Notes:**
-- Get document heads using `doc.get_heads()`
-- Heads are hex-encoded change hash strings
+- Added `get_document_heads()` to get current heads from DocHandle
+- Added `create_snapshot_file_entry()` to create SnapshotFileEntry from synced file
+- Snapshot already has `load()`, `save()`, `path_in()`, `update_timestamp()`, `add_file()` methods
+- 45 tests passing (2 new tests)
 
 ---
 

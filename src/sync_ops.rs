@@ -1,14 +1,15 @@
 //! Sync operations for creating and updating Automerge documents.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use automerge::Automerge;
+use automerge::{Automerge, ChangeHash};
 use autosurgeon::{hydrate, reconcile};
 use samod::{AutomergeUrl, ConnectionId, DocHandle, Repo};
 use thiserror::Error;
 
 use crate::documents::{DirectoryDocument, DirectoryEntry, FileDocument};
 use crate::files::{get_file_permissions, read_text_file, FileInfo};
+use crate::snapshot::SnapshotFileEntry;
 
 /// Errors that can occur during sync operations
 #[derive(Debug, Error)]
@@ -170,6 +171,31 @@ pub async fn wait_for_all_synced(handles: &[&DocHandle], conn_id: ConnectionId) 
     futures::future::join_all(futures).await;
 }
 
+/// Get the current heads of a document
+pub fn get_document_heads(handle: &DocHandle) -> Vec<ChangeHash> {
+    handle.with_document(|doc| doc.get_heads())
+}
+
+/// Create a SnapshotFileEntry for a synced file
+///
+/// This captures the current state of the file document for the snapshot.
+pub fn create_snapshot_file_entry(
+    handle: &DocHandle,
+    absolute_path: PathBuf,
+    file_info: &FileInfo,
+) -> SnapshotFileEntry {
+    let heads = get_document_heads(handle);
+    let url = handle.url();
+
+    SnapshotFileEntry {
+        path: absolute_path,
+        url,
+        head: heads,
+        extension: file_info.extension.clone(),
+        mime_type: file_info.mime_type.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +288,46 @@ mod tests {
         // Verify the changes persisted by re-reading
         let reloaded: DirectoryDocument = dir_handle.with_document(|doc| hydrate(doc).unwrap());
         assert_eq!(reloaded.docs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_create_snapshot_file_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        fs::write(&file_path, "Hello, world!").unwrap();
+
+        let file_info = FileInfo::from_path(&file_path);
+        let repo = Repo::build_tokio().load().await;
+
+        let created = create_file_document(&repo, &file_path, &file_info)
+            .await
+            .unwrap();
+
+        let entry = create_snapshot_file_entry(&created.handle, file_path.clone(), &file_info);
+
+        assert_eq!(entry.path, file_path);
+        assert_eq!(entry.extension, "txt");
+        assert_eq!(entry.mime_type, "text/plain");
+        assert!(!entry.head.is_empty()); // Should have at least one head
+        assert!(entry.url.to_string().starts_with("automerge:"));
+    }
+
+    #[tokio::test]
+    async fn test_get_document_heads() {
+        let repo = Repo::build_tokio().load().await;
+
+        let dir = DirectoryDocument::new();
+        let mut doc = Automerge::new();
+        doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+            reconcile(txn, &dir).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let handle = repo.create(doc).await.unwrap();
+        let heads = get_document_heads(&handle);
+
+        // A document with one transaction should have exactly one head
+        assert_eq!(heads.len(), 1);
     }
 }
