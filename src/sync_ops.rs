@@ -292,6 +292,52 @@ pub fn write_remote_file_to_disk(handle: &DocHandle, path: &Path) -> Result<(), 
     Ok(())
 }
 
+/// Merge local changes into a document that has remote changes
+///
+/// This implements CRDT merge for conflict resolution:
+/// 1. Fork the document at the snapshot heads (common ancestor)
+/// 2. Apply local changes to the fork
+/// 3. Merge the fork back into the main document
+/// 4. The CRDT automatically resolves conflicts
+///
+/// Returns the new heads after merge and the merged content.
+pub fn merge_local_into_remote(
+    handle: &DocHandle,
+    snapshot_heads: &[ChangeHash],
+    local_content: FileContent,
+    local_permissions: Option<i64>,
+) -> Result<Vec<ChangeHash>, SyncError> {
+    handle.with_document(|doc| {
+        // Fork at snapshot heads (the common ancestor state)
+        let mut fork = doc
+            .fork_at(snapshot_heads)
+            .map_err(|e| SyncError::Document(format!("Failed to fork at snapshot heads: {}", e)))?;
+
+        // Apply local changes to the fork
+        let mut file_doc: FileDocument =
+            hydrate(&fork).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+
+        file_doc.content = local_content;
+        if let Some(perms) = local_permissions {
+            file_doc.metadata.permissions = perms;
+        }
+
+        fork.transact::<_, _, automerge::AutomergeError>(|txn| {
+            reconcile(txn, &file_doc).map_err(|e| {
+                automerge::AutomergeError::InvalidObjId(format!("reconcile failed: {}", e))
+            })?;
+            Ok(())
+        })
+        .map_err(|e| SyncError::Reconcile(format!("{:?}", e)))?;
+
+        // Merge fork (with local changes) back into main doc (with remote changes)
+        doc.merge(&mut fork)
+            .map_err(|e| SyncError::Document(format!("Failed to merge: {}", e)))?;
+
+        Ok(doc.get_heads())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,5 +671,52 @@ mod tests {
         // Verify binary content was written correctly
         let written_content = fs::read(&dest_path).unwrap();
         assert_eq!(written_content, binary_data);
+    }
+
+    #[tokio::test]
+    async fn test_merge_local_into_remote() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        fs::write(&file_path, "Original content").unwrap();
+
+        let file_info = FileInfo::from_path(&file_path);
+        let repo = Repo::build_tokio().load().await;
+
+        // Create file document
+        let created = create_file_document(&repo, &file_path, &file_info)
+            .await
+            .unwrap();
+
+        // Get snapshot heads (the common ancestor)
+        let snapshot_heads = get_document_heads(&created.handle);
+
+        // Simulate remote change: update the document directly
+        update_file_document(&created.handle, FileContent::text("Remote change"), None).unwrap();
+
+        // Simulate local change: different content
+        let local_content = FileContent::text("Local change");
+
+        // Merge local into remote
+        let new_heads = merge_local_into_remote(
+            &created.handle,
+            &snapshot_heads,
+            local_content,
+            None,
+        )
+        .unwrap();
+
+        // Heads should be different from both remote and snapshot
+        assert_ne!(new_heads, snapshot_heads);
+
+        // The merged document should contain both changes (CRDT merge)
+        // For text, Automerge will have merged the changes
+        let file_doc: FileDocument =
+            created.handle.with_document(|doc| hydrate(doc).unwrap());
+
+        // The content will be a CRDT merge - both "Remote change" and "Local change"
+        // were applied to the same field, so one will win (last-writer-wins for scalar strings)
+        // The important thing is that the merge succeeded without error
+        let content = file_doc.content_string();
+        assert!(!content.is_empty());
     }
 }

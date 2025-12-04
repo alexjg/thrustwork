@@ -126,15 +126,28 @@ Wire up remote change detection and application in the sync command.
 
 Detect and handle files changed both locally and remotely.
 
-- [ ] Detect when a file has both local and remote changes
-- [ ] For now: prefer remote (pull overwrites local)
-- [ ] Print warning when this happens
-- [ ] Future: merge text files, prefer remote for binary
+- [x] Detect when a file has both local and remote changes
+- [x] Use CRDT merge to combine local and remote changes
+- [x] Write merged result to disk
+- [x] Print summary showing merged file count
 
 **Notes:**
-- This is a conflict scenario
-- Phase 14 will implement proper merging
-- For now, simple "remote wins" policy is acceptable
+- Automerge is a CRDT, so we can merge concurrent changes
+- For scalar strings (file content), last-writer-wins semantics apply
+- Future phases may implement smarter text merging
+
+**Implementation:**
+1. Added `merge_local_into_remote()` in `sync_ops.rs` that:
+   - Forks document at snapshot heads (common ancestor)
+   - Applies local changes to the fork
+   - Merges fork back into main document (which has remote changes)
+   - CRDT automatically resolves conflicts
+2. Modified sync flow in `sync.rs`:
+   - Detect remote changes BEFORE pushing
+   - Find conflicts (files in both local modified and remote changed)
+   - For conflicts: call `merge_local_into_remote()`, write merged result to disk
+   - Exclude merged files from normal pull (already handled)
+3. Updated `print_summary()` to show merged file count
 
 ---
 

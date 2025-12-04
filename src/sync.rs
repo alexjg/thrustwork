@@ -57,18 +57,76 @@ pub async fn execute(paths: &PushworkPaths, config: &DirectoryConfig, repo: &Rep
     // Detect local modifications
     let modified_files = detect_modified_files(repo, &paths.root, &snapshot).await;
 
+    // Detect remote changes BEFORE pushing (to find conflicts)
+    let remote_changes = detect_remote_changes(repo, &snapshot).await;
+
+    // Find conflicts: files changed both locally and remotely
+    // Build a map so we can get the remote handle for merging
+    let remote_map: std::collections::HashMap<_, _> = remote_changes
+        .iter()
+        .map(|r| (r.relative_path.as_str(), r))
+        .collect();
+
+    let (conflicts, safe_modified): (Vec<_>, Vec<_>) = modified_files
+        .into_iter()
+        .partition(|m| remote_map.contains_key(m.relative_path.as_str()));
+
     // Track counts for summary
     let mut pushed_new = 0;
     let mut pushed_modified = 0;
+    let mut merged_count = 0;
 
-    // Process local changes if any
-    let has_local_changes = scan_result.has_changes() || !modified_files.is_empty();
+    // Process conflicts using CRDT merge
+    for conflict in &conflicts {
+        println!("  Merging: {} (changed locally and remotely)", conflict.relative_path);
+
+        let remote = remote_map.get(conflict.relative_path.as_str()).unwrap();
+        let abs_path = paths.root.join(&conflict.relative_path);
+
+        // Determine content type
+        let is_text = files::is_text_mime_type(&conflict.snapshot_entry.mime_type);
+        let local_content = if is_text {
+            FileContent::text(String::from_utf8_lossy(&conflict.new_content))
+        } else {
+            FileContent::binary(conflict.new_content.clone())
+        };
+
+        // Get local permissions
+        let local_perms = files::get_file_permissions(&abs_path)
+            .ok()
+            .map(|p| p as i64);
+
+        // Merge local changes into the remote document
+        match sync_ops::merge_local_into_remote(
+            &remote.handle,
+            &conflict.snapshot_entry.head,
+            local_content,
+            local_perms,
+        ) {
+            Ok(new_heads) => {
+                // Write merged content to disk
+                if let Err(e) = sync_ops::write_remote_file_to_disk(&remote.handle, &abs_path) {
+                    eprintln!("  Error writing merged content for {}: {}", conflict.relative_path, e);
+                    continue;
+                }
+                // Update snapshot with new heads
+                snapshot.update_file_heads(&conflict.relative_path, new_heads);
+                merged_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  Error merging {}: {}", conflict.relative_path, e);
+            }
+        }
+    }
+
+    // Process local changes if any (excluding conflicts)
+    let has_local_changes = scan_result.has_changes() || !safe_modified.is_empty();
     if has_local_changes {
         if !scan_result.new_files.is_empty() {
             println!("Found {} new file(s) to push", scan_result.new_files.len());
         }
-        if !modified_files.is_empty() {
-            println!("Found {} modified file(s) to push", modified_files.len());
+        if !safe_modified.is_empty() {
+            println!("Found {} modified file(s) to push", safe_modified.len());
         }
 
         // Process new files
@@ -78,8 +136,8 @@ pub async fn execute(paths: &PushworkPaths, config: &DirectoryConfig, repo: &Rep
         // Update root directory with new files
         update_root_directory(&dir_handle, &new_result.created);
 
-        // Process modified files
-        let modified_result = process_modified_files(repo, &paths.root, &modified_files).await;
+        // Process modified files (excluding conflicts)
+        let modified_result = process_modified_files(repo, &paths.root, &safe_modified).await;
         pushed_modified = modified_result.handles.len();
 
         // Wait for sync if we pushed anything
@@ -107,17 +165,26 @@ pub async fn execute(paths: &PushworkPaths, config: &DirectoryConfig, repo: &Rep
         }
     }
 
-    // Detect and pull remote changes
-    let remote_changes = detect_remote_changes(repo, &snapshot).await;
-    let pulled_count = if !remote_changes.is_empty() {
-        println!("Found {} file(s) with remote changes", remote_changes.len());
-        process_remote_changes(&mut snapshot, &paths.root, &remote_changes)
+    // Pull remote changes (excluding files that were already merged as conflicts)
+    let conflict_paths: std::collections::HashSet<_> = conflicts
+        .iter()
+        .map(|c| c.relative_path.as_str())
+        .collect();
+
+    let remote_only: Vec<_> = remote_changes
+        .iter()
+        .filter(|r| !conflict_paths.contains(r.relative_path.as_str()))
+        .collect();
+
+    let pulled_count = if !remote_only.is_empty() {
+        println!("Found {} file(s) with remote changes", remote_only.len());
+        process_remote_changes_refs(&mut snapshot, &paths.root, &remote_only)
     } else {
         0
     };
 
     // Check if anything happened
-    if pushed_new == 0 && pushed_modified == 0 && pulled_count == 0 {
+    if pushed_new == 0 && pushed_modified == 0 && pulled_count == 0 && merged_count == 0 {
         println!("No changes.");
         return;
     }
@@ -129,7 +196,7 @@ pub async fn execute(paths: &PushworkPaths, config: &DirectoryConfig, repo: &Rep
     });
 
     // Print summary
-    print_summary(pushed_new, pushed_modified, pulled_count);
+    print_summary(pushed_new, pushed_modified, pulled_count, merged_count);
 }
 
 // =============================================================================
@@ -236,10 +303,10 @@ async fn process_modified_files(
 }
 
 /// Process remote changes: write updated content to disk
-fn process_remote_changes(
+fn process_remote_changes_refs(
     snapshot: &mut Snapshot,
     root: &Path,
-    remote_changes: &[RemotelyChangedFile],
+    remote_changes: &[&RemotelyChangedFile],
 ) -> usize {
     let mut pulled = 0;
 
@@ -389,14 +456,8 @@ fn load_or_create_snapshot(paths: &PushworkPaths, root_url: &AutomergeUrl) -> Sn
 }
 
 /// Print sync summary
-fn print_summary(pushed_new: usize, pushed_modified: usize, pulled: usize) {
+fn print_summary(pushed_new: usize, pushed_modified: usize, pulled: usize, merged: usize) {
     let total_pushed = pushed_new + pushed_modified;
-    let total = total_pushed + pulled;
-
-    if total == 0 {
-        println!("\nNo changes.");
-        return;
-    }
 
     let mut parts = Vec::new();
     if pushed_new > 0 {
@@ -414,5 +475,8 @@ fn print_summary(pushed_new: usize, pushed_modified: usize, pulled: usize) {
     }
     if pulled > 0 {
         println!("Pulled {} file(s).", pulled);
+    }
+    if merged > 0 {
+        println!("Merged {} file(s) (changed locally and remotely).", merged);
     }
 }
