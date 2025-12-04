@@ -28,5 +28,140 @@ The overall design we are working on is described in DESIGN.md and the separate 
 - File `content` must be `String` (scalar string = ImmutableString in pushwork)
 - `permissions` is stored as `i64` (JavaScript number -> Automerge Int)
 - `lastSyncAt` may be absent, use `#[autosurgeon(missing = "Default::default")]`
+- Snapshot heads are base58check encoded (using `bs58` crate with check feature)
+
+---
+
+## Phase 6: Detect and Sync Local Changes
+
+**Goal**: Detect when a tracked file has changed and push the update.
+
+**Deliverable**: Modify a synced file, run sync, change is pushed.
+
+---
+
+### Task 6.1: Load Document at Snapshot Heads
+
+Implement reading the file content as it was at the last sync.
+
+- [ ] Add function to load a file document at specific heads
+- [ ] Use `Automerge::fork_at()` or similar to get document state at heads
+- [ ] Extract content from the historical document state
+- [ ] Add tests for loading at heads
+
+**Notes:**
+- Need to compare current local file against what was synced last
+- The snapshot stores heads from the last sync
+- This allows detecting if local file changed since last sync
+
+---
+
+### Task 6.2: Detect Local File Changes
+
+Compare local file content against snapshot state.
+
+- [ ] For each file in snapshot, check if it still exists on disk
+- [ ] Read current file content from disk
+- [ ] Load document content at snapshot heads
+- [ ] Compare: if different, mark as LOCAL_ONLY change
+- [ ] Add `modified_files` detection to scanner
+
+**Notes:**
+- A file is modified if disk content differs from document-at-snapshot-heads
+- This is Phase 6's focus; remote changes come in Phase 7
+
+---
+
+### Task 6.3: Update Existing File Document
+
+Update a file document with new local content.
+
+- [ ] Load the existing file document by URL from snapshot
+- [ ] Update the `content` field with new file content
+- [ ] Update `metadata.permissions` if changed
+- [ ] Reconcile changes back to document
+- [ ] Add `update_file_document()` function to sync_ops
+
+**Notes:**
+- Don't create a new document - update the existing one
+- This preserves the document URL and history
+
+---
+
+### Task 6.4: Update Snapshot After Push
+
+Update snapshot with new document heads after pushing changes.
+
+- [ ] After updating document, get new heads
+- [ ] Update the file's entry in snapshot with new heads
+- [ ] Save snapshot to disk
+
+**Notes:**
+- The snapshot must reflect the new state after sync
+- New heads indicate what version we last synced
+
+---
+
+### Task 6.5: Wire Up Modified File Sync
+
+Integrate change detection into the sync command.
+
+- [ ] Load existing snapshot at start of sync
+- [ ] Run change detection (new files + modified files)
+- [ ] For new files: create documents (existing behavior)
+- [ ] For modified files: update documents (new behavior)
+- [ ] Wait for sync to complete
+- [ ] Update snapshot with all changes
+
+**Notes:**
+- Sync command now handles both new and modified files
+- The flow: detect changes → push changes → wait for sync → update snapshot
+
+---
+
+### Task 6.6: Interop Verification
+
+Verify local changes sync correctly with pushwork.
+
+- [ ] Clone a pushwork directory with thrustwork
+- [ ] Modify a file locally
+- [ ] Run `thrustwork sync`
+- [ ] Verify pushwork sees the updated content
+
+**Verification:**
+```
+# Setup: Create with pushwork
+$ mkdir /tmp/pushwork-source && cd /tmp/pushwork-source
+$ pushwork init
+$ echo "Original content" > test.txt
+$ pushwork sync
+
+# Clone with thrustwork
+$ mkdir /tmp/thrustwork-clone && cd /tmp/thrustwork-clone
+$ thrustwork clone <url>
+$ cat test.txt  # "Original content"
+
+# Modify and sync
+$ echo "Modified by thrustwork" > test.txt
+$ thrustwork sync
+
+# Verify with pushwork
+$ cd /tmp/pushwork-source
+$ pushwork sync
+$ cat test.txt  # Should show "Modified by thrustwork"
+```
+
+---
+
+### Phase 6 Completion Checklist
+
+- [ ] Can load document content at specific heads
+- [ ] Can detect when local file differs from last sync
+- [ ] Can update existing file document with new content
+- [ ] Snapshot updated with new heads after push
+- [ ] Sync command handles modified files
+- [ ] Changes sync correctly with pushwork
+
+**Phase 6 complete. Proceed to Phase 7 in IMPLEMENTATION_PLAN.md.**
 
 ---
