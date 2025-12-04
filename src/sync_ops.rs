@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use automerge::Automerge;
-use autosurgeon::reconcile;
-use samod::{AutomergeUrl, DocHandle, Repo};
+use autosurgeon::{hydrate, reconcile};
+use samod::{AutomergeUrl, ConnectionId, DocHandle, Repo};
 use thiserror::Error;
 
 use crate::documents::{DirectoryDocument, DirectoryEntry, FileDocument};
@@ -32,6 +32,14 @@ pub enum SyncError {
     /// Automerge/autosurgeon error
     #[error("Document error: {0}")]
     Document(String),
+
+    /// Failed to hydrate document
+    #[error("Failed to hydrate document: {0}")]
+    Hydrate(String),
+
+    /// Failed to reconcile document
+    #[error("Failed to reconcile document: {0}")]
+    Reconcile(String),
 }
 
 /// Result of creating a file document
@@ -118,6 +126,50 @@ pub fn add_file_to_directory(dir: &mut DirectoryDocument, name: String, url: &Au
         .push(DirectoryEntry::file(name, url.to_string()));
 }
 
+/// Update a directory document with new file entries
+///
+/// This loads the directory document, adds the new file entries, and saves it back.
+/// Returns the updated DirectoryDocument.
+pub fn update_directory_with_files(
+    dir_handle: &DocHandle,
+    new_files: &[(String, AutomergeUrl)],
+) -> Result<DirectoryDocument, SyncError> {
+    dir_handle.with_document(|doc| {
+        // Hydrate the existing directory document
+        let mut dir: DirectoryDocument =
+            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+
+        // Add new file entries
+        for (name, url) in new_files {
+            add_file_to_directory(&mut dir, name.clone(), url);
+        }
+
+        // Reconcile back to Automerge
+        doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+            reconcile(txn, &dir).map_err(|e| {
+                automerge::AutomergeError::InvalidObjId(format!("reconcile failed: {}", e))
+            })?;
+            Ok(())
+        })
+        .map_err(|e| SyncError::Reconcile(format!("{:?}", e)))?;
+
+        Ok(dir)
+    })
+}
+
+/// Wait for the sync server to have our changes for multiple documents
+///
+/// This ensures that changes have been replicated to the sync server for all
+/// provided document handles. Waits concurrently for efficiency.
+pub async fn wait_for_all_synced(handles: &[&DocHandle], conn_id: ConnectionId) {
+    let futures: Vec<_> = handles
+        .iter()
+        .map(|h| h.they_have_our_changes(conn_id))
+        .collect();
+
+    futures::future::join_all(futures).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +222,45 @@ mod tests {
         assert_eq!(dir.docs.len(), 1);
         assert_eq!(dir.docs[0].name_str(), "test.txt");
         assert_eq!(dir.docs[0].entry_type_str(), "file");
+    }
+
+    #[tokio::test]
+    async fn test_update_directory_with_files() {
+        // Create a repo and an empty directory document
+        let repo = Repo::build_tokio().load().await;
+
+        let dir = DirectoryDocument::new();
+        let mut doc = Automerge::new();
+        doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+            reconcile(txn, &dir).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let dir_handle = repo.create(doc).await.unwrap();
+
+        // Create URLs for new files
+        let url1: AutomergeUrl = "automerge:550e8400-e29b-41d4-a716-446655440000"
+            .parse()
+            .unwrap();
+        let url2: AutomergeUrl = "automerge:6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+            .parse()
+            .unwrap();
+
+        let new_files = vec![
+            ("file1.txt".to_string(), url1),
+            ("file2.txt".to_string(), url2),
+        ];
+
+        // Update the directory
+        let updated_dir = update_directory_with_files(&dir_handle, &new_files).unwrap();
+
+        assert_eq!(updated_dir.docs.len(), 2);
+        assert_eq!(updated_dir.docs[0].name_str(), "file1.txt");
+        assert_eq!(updated_dir.docs[1].name_str(), "file2.txt");
+
+        // Verify the changes persisted by re-reading
+        let reloaded: DirectoryDocument = dir_handle.with_document(|doc| hydrate(doc).unwrap());
+        assert_eq!(reloaded.docs.len(), 2);
     }
 }

@@ -1311,6 +1311,7 @@ dependencies = [
  "automerge",
  "autosurgeon",
  "clap",
+ "futures",
  "glob",
  "mime_guess",
  "samod",

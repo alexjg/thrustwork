@@ -150,15 +150,19 @@ Implement creating an Automerge file document from a local file.
 
 Add the new file entry to the root directory.
 
-- [ ] Load the root directory document from repo
-- [ ] Hydrate to `DirectoryDocument`
-- [ ] Add new `DirectoryEntry` for the file
-- [ ] Reconcile back to Automerge
-- [ ] Wait for sync to complete
+- [x] Load the root directory document from repo
+- [x] Hydrate to `DirectoryDocument`
+- [x] Add new `DirectoryEntry` for the file
+- [x] Reconcile back to Automerge
+- [x] Wait for sync to complete
 
 **Notes:**
-- The entry needs: name, type ("file"), url
-- Use `they_have_our_changes` to wait for sync
+- Added `update_directory_with_files()` to `sync_ops.rs`
+- Takes DocHandle and list of (name, url) pairs
+- Hydrates, adds entries, reconciles back in a single `with_document` call
+- Added `wait_for_all_synced()` helper - waits for multiple docs concurrently using `futures::future::join_all`
+- Added `futures` crate dependency
+- 43 tests passing (1 new test)
 
 ---
 
