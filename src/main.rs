@@ -11,6 +11,7 @@ mod files;
 mod init;
 mod scanner;
 mod snapshot;
+mod sync_ops;
 
 use documents::{DirectoryDocument, DirectoryEntry, FileDocument};
 

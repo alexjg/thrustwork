@@ -129,17 +129,20 @@ Implement scanning to find files that need to be pushed.
 
 Implement creating an Automerge file document from a local file.
 
-- [ ] Read file content from disk
-- [ ] Get file permissions (Unix mode)
-- [ ] Detect MIME type and extension
-- [ ] Create `FileDocument` with the content
-- [ ] Reconcile to Automerge document
-- [ ] Create document in repo and get URL
+- [x] Read file content from disk
+- [x] Get file permissions (Unix mode)
+- [x] Detect MIME type and extension
+- [x] Create `FileDocument` with the content
+- [x] Reconcile to Automerge document
+- [x] Create document in repo and get URL
 
 **Notes:**
-- Reuse `FileDocument` from `documents.rs`
-- For text files, content is the string content
-- Permissions should be read from filesystem metadata
+- Created `src/sync_ops.rs` with sync operations
+- `create_file_document()` reads file, creates FileDocument, reconciles to Automerge, creates in repo
+- Returns `CreatedFileDocument` with handle, URL, and filename
+- Only supports text files for Phase 4 (returns `SyncError::NotTextFile` for binary)
+- `add_file_to_directory()` helper to add file entry to DirectoryDocument
+- 42 tests passing (3 new sync_ops tests)
 
 ---
 
