@@ -1,8 +1,7 @@
 use automerge::Automerge;
 use autosurgeon::{hydrate, reconcile};
 use clap::{Parser, Subcommand};
-use samod::{storage::TokioFilesystemStorage, ConnDirection, DocumentId, Repo};
-use std::str::FromStr;
+use samod::{storage::TokioFilesystemStorage, AutomergeUrl, ConnDirection, Repo};
 use tokio_tungstenite::connect_async;
 
 mod changes;
@@ -152,15 +151,11 @@ async fn read_dir(repo: &Repo, url: &str) {
     println!("Waiting for sync protocol to establish...");
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    // Parse the document ID from the URL
-    let doc_id_str = url
-        .strip_prefix("automerge:")
-        .expect("URL must start with 'automerge:'");
-
-    let doc_id = DocumentId::from_str(doc_id_str).expect("Invalid document ID");
+    // Parse the URL
+    let automerge_url: AutomergeUrl = url.parse().expect("Invalid automerge URL");
 
     let dir_handle = repo
-        .find(doc_id)
+        .find(automerge_url.doc_id().clone())
         .await
         .expect("Repo stopped")
         .expect("Directory document not found");
@@ -182,14 +177,12 @@ async fn read_dir(repo: &Repo, url: &str) {
 
         // If it's a file, try to load and display its content
         if entry.entry_type_str() == "file" {
-            let file_doc_id_str = entry
+            let file_url: AutomergeUrl = entry
                 .url_str()
-                .strip_prefix("automerge:")
-                .expect("File URL must start with 'automerge:'");
-            let file_doc_id =
-                DocumentId::from_str(file_doc_id_str).expect("Invalid file document ID");
+                .parse()
+                .expect("Invalid file automerge URL");
 
-            if let Some(file_handle) = repo.find(file_doc_id).await.expect("Repo stopped") {
+            if let Some(file_handle) = repo.find(file_url.doc_id().clone()).await.expect("Repo stopped") {
                 let file: FileDocument = file_handle.with_document(|doc| {
                     hydrate(doc).expect("Failed to hydrate file document")
                 });

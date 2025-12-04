@@ -1,9 +1,8 @@
 //! Change detection for comparing local files against synced state.
 
 use std::path::Path;
-use std::str::FromStr;
 
-use samod::{DocumentId, Repo};
+use samod::Repo;
 
 use crate::files::read_text_file;
 use crate::snapshot::{Snapshot, SnapshotFileEntry};
@@ -50,19 +49,7 @@ pub async fn detect_modified_files(
         };
 
         // Load the document and get content at snapshot heads
-        let doc_id_str = entry
-            .url
-            .to_string()
-            .strip_prefix("automerge:")
-            .unwrap_or("")
-            .to_string();
-
-        let doc_id = match DocumentId::from_str(&doc_id_str) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-
-        let handle = match repo.find(doc_id).await.expect("Repo stopped") {
+        let handle = match repo.find(entry.url.doc_id().clone()).await.expect("Repo stopped") {
             Some(h) => h,
             None => continue,
         };

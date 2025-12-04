@@ -3,11 +3,10 @@
 //! Handles synchronizing local file changes with the Automerge sync server.
 
 use std::path::Path;
-use std::str::FromStr;
 
 use automerge::ChangeHash;
 use autosurgeon::hydrate;
-use samod::{AutomergeUrl, ConnDirection, ConnectionId, DocHandle, DocumentId, Repo};
+use samod::{AutomergeUrl, ConnDirection, ConnectionId, DocHandle, Repo};
 use tokio_tungstenite::connect_async;
 
 use crate::changes::{detect_modified_files, ModifiedFile};
@@ -25,21 +24,24 @@ use crate::sync_ops;
 
 /// Execute the sync command
 pub async fn execute(paths: &PushworkPaths, config: &DirectoryConfig, repo: &Repo) {
-    let root_url_str = config.root_directory_url.as_ref().unwrap_or_else(|| {
-        eprintln!("No root directory URL in config - directory not properly initialized");
-        std::process::exit(1);
-    });
-
-    let root_url: AutomergeUrl = root_url_str.parse().unwrap_or_else(|e| {
-        eprintln!("Invalid root directory URL: {}", e);
-        std::process::exit(1);
-    });
+    let root_url: AutomergeUrl = config
+        .root_directory_url
+        .as_ref()
+        .unwrap_or_else(|| {
+            eprintln!("No root directory URL in config - directory not properly initialized");
+            std::process::exit(1);
+        })
+        .parse()
+        .unwrap_or_else(|e| {
+            eprintln!("Invalid root directory URL: {}", e);
+            std::process::exit(1);
+        });
 
     // Connect to sync server
     let conn_id = connect_to_server(repo, &config.sync_server_url()).await;
 
     // Load root directory document
-    let dir_handle = load_root_directory(repo, root_url_str).await;
+    let dir_handle = load_root_directory(repo, &root_url).await;
 
     // Load or create snapshot
     let mut snapshot = load_or_create_snapshot(paths, &root_url);
@@ -195,24 +197,7 @@ async fn process_modified_files(
         println!("  Updating: {}", modified.relative_path);
 
         // Load the document by URL
-        let doc_id_str = modified
-            .snapshot_entry
-            .url
-            .to_string()
-            .strip_prefix("automerge:")
-            .unwrap_or("")
-            .to_string();
-
-        let doc_id = match DocumentId::from_str(&doc_id_str) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!(
-                    "  Error: invalid document ID for {}: {}",
-                    modified.relative_path, e
-                );
-                continue;
-            }
-        };
+        let doc_id = modified.snapshot_entry.url.doc_id().clone();
 
         let handle = match repo.find(doc_id).await.expect("Repo stopped") {
             Some(h) => h,
@@ -345,16 +330,8 @@ async fn connect_to_server(repo: &Repo, sync_url: &str) -> ConnectionId {
 }
 
 /// Load the root directory document handle
-async fn load_root_directory(repo: &Repo, root_url: &str) -> DocHandle {
-    let doc_id = root_url
-        .strip_prefix("automerge:")
-        .and_then(|s| DocumentId::from_str(s).ok())
-        .unwrap_or_else(|| {
-            eprintln!("Invalid root directory URL");
-            std::process::exit(1);
-        });
-
-    repo.find(doc_id)
+async fn load_root_directory(repo: &Repo, root_url: &AutomergeUrl) -> DocHandle {
+    repo.find(root_url.doc_id().clone())
         .await
         .expect("Repo stopped")
         .unwrap_or_else(|| {

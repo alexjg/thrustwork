@@ -1,10 +1,9 @@
 //! Clone command implementation for pulling remote directories.
 
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use autosurgeon::hydrate;
-use samod::{AutomergeUrl, DocHandle, DocumentId, Repo};
+use samod::{AutomergeUrl, DocHandle, Repo};
 use thiserror::Error;
 
 use crate::config::DirectoryConfig;
@@ -48,10 +47,10 @@ pub(crate) async fn execute_clone(
     paths: PushworkPaths,
 ) -> Result<CloneResult, CloneError> {
     // Parse URL and load directory
-    let doc_id = parse_automerge_url(url)?;
+    let root_url = parse_automerge_url(url)?;
     println!("Loading root directory...");
 
-    let (_dir_handle, dir) = load_directory(repo, doc_id).await?;
+    let (_dir_handle, dir) = load_directory(repo, &root_url).await?;
 
     println!("Directory loaded:");
     println!("  Type: {}", dir.patchwork.doc_type_str());
@@ -100,7 +99,7 @@ pub(crate) async fn execute_clone(
     let written_count = write_files_to_disk(&cwd, &loaded_files);
 
     // Save config and snapshot
-    save_config_and_snapshot(&paths, url, &cwd, &loaded_files)?;
+    save_config_and_snapshot(&paths, &root_url, &cwd, &loaded_files)?;
     println!("Config and snapshot saved.");
 
     Ok(CloneResult {
@@ -112,22 +111,19 @@ pub(crate) async fn execute_clone(
 /// Save config and snapshot after cloning
 fn save_config_and_snapshot(
     paths: &PushworkPaths,
-    url: &str,
+    root_url: &AutomergeUrl,
     cwd: &Path,
     files: &[LoadedFile],
 ) -> Result<(), CloneError> {
     // Update config with root directory URL
     let mut config = DirectoryConfig::load(&paths.config_file).unwrap_or_default();
-    config.root_directory_url = Some(url.to_string());
+    config.root_directory_url = Some(root_url.to_string());
     config
         .save(&paths.config_file)
         .map_err(|e| CloneError::SaveConfig(e.to_string()))?;
 
     // Create snapshot with cloned files
-    let root_url: AutomergeUrl = url
-        .parse()
-        .map_err(|e| CloneError::InvalidUrl(format!("{}", e)))?;
-    let mut snapshot = Snapshot::new(cwd.to_path_buf(), Some(root_url));
+    let mut snapshot = Snapshot::new(cwd.to_path_buf(), Some(root_url.clone()));
 
     for file in files {
         let heads = file.handle.with_document(|doc| doc.get_heads());
@@ -207,10 +203,10 @@ async fn load_files_concurrently(repo: &Repo, files: &[FileToClone]) -> Vec<Opti
 /// Load the root directory document and hydrate it
 async fn load_directory(
     repo: &Repo,
-    doc_id: DocumentId,
+    url: &AutomergeUrl,
 ) -> Result<(DocHandle, DirectoryDocument), CloneError> {
     let handle = repo
-        .find(doc_id)
+        .find(url.doc_id().clone())
         .await
         .expect("Repo stopped")
         .ok_or(CloneError::RootNotFound)?;
@@ -235,14 +231,11 @@ fn extract_files_from_directory(dir: &DirectoryDocument) -> (Vec<FileToClone>, u
         let url_str = entry.url_str();
 
         if entry_type == "file" {
-            if let Some(doc_id_str) = url_str.strip_prefix("automerge:") {
-                if let Ok(doc_id) = DocumentId::from_str(doc_id_str) {
-                    files.push(FileToClone { name, doc_id });
-                } else {
-                    eprintln!("  Warning: Invalid document ID for '{}': {}", name, url_str);
+            match url_str.parse::<AutomergeUrl>() {
+                Ok(url) => files.push(FileToClone { name, url }),
+                Err(e) => {
+                    eprintln!("  Warning: Invalid file URL for '{}': {}", name, e);
                 }
-            } else {
-                eprintln!("  Warning: Invalid file URL for '{}': {}", name, url_str);
             }
         } else if entry_type == "folder" {
             println!(
@@ -258,7 +251,7 @@ fn extract_files_from_directory(dir: &DirectoryDocument) -> (Vec<FileToClone>, u
 
 /// Load a single file document
 async fn load_single_file(repo: &Repo, file: &FileToClone) -> Option<LoadedFile> {
-    let handle = match repo.find(file.doc_id.clone()).await.expect("Repo stopped") {
+    let handle = match repo.find(file.url.doc_id().clone()).await.expect("Repo stopped") {
         Some(h) => h,
         None => {
             eprintln!("  Warning: File document not found for '{}'", file.name);
@@ -284,23 +277,16 @@ async fn load_single_file(repo: &Repo, file: &FileToClone) -> Option<LoadedFile>
     })
 }
 
-/// Parse an Automerge URL and extract the document ID
-fn parse_automerge_url(url: &str) -> Result<DocumentId, CloneError> {
-    if !url.starts_with("automerge:") {
-        return Err(CloneError::InvalidUrl(
-            "URL must start with 'automerge:'".to_string(),
-        ));
-    }
-
-    let doc_id_str = url.strip_prefix("automerge:").unwrap();
-    DocumentId::from_str(doc_id_str)
-        .map_err(|e| CloneError::InvalidUrl(format!("Invalid document ID: {}", e)))
+/// Parse an Automerge URL
+fn parse_automerge_url(url: &str) -> Result<AutomergeUrl, CloneError> {
+    url.parse()
+        .map_err(|e| CloneError::InvalidUrl(format!("{}", e)))
 }
 
 /// Information about a file to clone
 struct FileToClone {
     name: String,
-    doc_id: DocumentId,
+    url: AutomergeUrl,
 }
 
 /// A file that has been loaded from the remote
