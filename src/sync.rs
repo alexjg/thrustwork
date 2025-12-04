@@ -9,7 +9,7 @@ use autosurgeon::hydrate;
 use samod::{AutomergeUrl, ConnDirection, ConnectionId, DocHandle, Repo};
 use tokio_tungstenite::connect_async;
 
-use crate::changes::{detect_modified_files, ModifiedFile};
+use crate::changes::{detect_modified_files, detect_remote_changes, ModifiedFile, RemotelyChangedFile};
 use crate::config::DirectoryConfig;
 use crate::documents::{FileContent, FileDocument};
 use crate::files::{self, FileInfo};
@@ -54,74 +54,82 @@ pub async fn execute(paths: &PushworkPaths, config: &DirectoryConfig, repo: &Rep
                 std::process::exit(1);
             });
 
-    // Detect modified files
+    // Detect local modifications
     let modified_files = detect_modified_files(repo, &paths.root, &snapshot).await;
 
-    // Check if there are any changes
-    if !scan_result.has_changes() && modified_files.is_empty() {
-        println!("No changes to sync.");
-        return;
+    // Track counts for summary
+    let mut pushed_new = 0;
+    let mut pushed_modified = 0;
+
+    // Process local changes if any
+    let has_local_changes = scan_result.has_changes() || !modified_files.is_empty();
+    if has_local_changes {
+        if !scan_result.new_files.is_empty() {
+            println!("Found {} new file(s) to push", scan_result.new_files.len());
+        }
+        if !modified_files.is_empty() {
+            println!("Found {} modified file(s) to push", modified_files.len());
+        }
+
+        // Process new files
+        let new_result = process_new_files(repo, &scan_result.new_files).await;
+        pushed_new = new_result.created.len();
+
+        // Update root directory with new files
+        update_root_directory(&dir_handle, &new_result.created);
+
+        // Process modified files
+        let modified_result = process_modified_files(repo, &paths.root, &modified_files).await;
+        pushed_modified = modified_result.handles.len();
+
+        // Wait for sync if we pushed anything
+        if pushed_new > 0 || pushed_modified > 0 {
+            let dir_handle_for_sync = if pushed_new > 0 {
+                Some(&dir_handle)
+            } else {
+                None
+            };
+            wait_for_sync(
+                &new_result.created,
+                &modified_result.handles,
+                dir_handle_for_sync,
+                conn_id,
+            )
+            .await;
+
+            // Update snapshot with pushed files
+            update_snapshot(
+                &mut snapshot,
+                &paths.root,
+                &new_result.created,
+                modified_result.entries,
+            );
+        }
     }
 
-    // Report what we found
-    if !scan_result.new_files.is_empty() {
-        println!("Found {} new file(s) to sync", scan_result.new_files.len());
-    }
-    if !modified_files.is_empty() {
-        println!(
-            "Found {} modified file(s) to sync",
-            modified_files.len()
-        );
-    }
-
-    // Process new files
-    let new_result = process_new_files(repo, &scan_result.new_files).await;
-
-    // Check if anything to sync
-    if new_result.created.is_empty() && modified_files.is_empty() {
-        println!("No files were synced.");
-        return;
-    }
-
-    // Update root directory with new files
-    update_root_directory(&dir_handle, &new_result.created);
-
-    // Process modified files
-    let modified_result = process_modified_files(repo, &paths.root, &modified_files).await;
-
-    // Wait for sync
-    let dir_handle_for_sync = if !new_result.created.is_empty() {
-        Some(&dir_handle)
+    // Detect and pull remote changes
+    let remote_changes = detect_remote_changes(repo, &snapshot).await;
+    let pulled_count = if !remote_changes.is_empty() {
+        println!("Found {} file(s) with remote changes", remote_changes.len());
+        process_remote_changes(&mut snapshot, &paths.root, &remote_changes)
     } else {
-        None
+        0
     };
-    wait_for_sync(
-        &new_result.created,
-        &modified_result.handles,
-        dir_handle_for_sync,
-        conn_id,
-    )
-    .await;
 
-    // Update and save snapshot
-    update_snapshot(
-        &mut snapshot,
-        &paths.root,
-        &new_result.created,
-        modified_result.entries,
-    );
+    // Check if anything happened
+    if pushed_new == 0 && pushed_modified == 0 && pulled_count == 0 {
+        println!("No changes.");
+        return;
+    }
 
+    // Save snapshot
     let snapshot_path = Snapshot::path_in(&paths.pushwork_dir);
     snapshot.save(&snapshot_path).unwrap_or_else(|e| {
         eprintln!("Warning: Failed to save snapshot: {}", e);
     });
 
     // Print summary
-    print_summary(
-        new_result.created.len(),
-        modified_result.handles.len(),
-        new_result.skipped,
-    );
+    print_summary(pushed_new, pushed_modified, pulled_count);
 }
 
 // =============================================================================
@@ -225,6 +233,33 @@ async fn process_modified_files(
     }
 
     ModifiedFilesResult { handles, entries }
+}
+
+/// Process remote changes: write updated content to disk
+fn process_remote_changes(
+    snapshot: &mut Snapshot,
+    root: &Path,
+    remote_changes: &[RemotelyChangedFile],
+) -> usize {
+    let mut pulled = 0;
+
+    for changed in remote_changes {
+        let abs_path = root.join(&changed.relative_path);
+        println!("  Pulling: {}", changed.relative_path);
+
+        match sync_ops::write_remote_file_to_disk(&changed.handle, &abs_path) {
+            Ok(()) => {
+                // Update snapshot with new heads
+                snapshot.update_file_heads(&changed.relative_path, changed.new_heads.clone());
+                pulled += 1;
+            }
+            Err(e) => {
+                eprintln!("  Error pulling {}: {}", changed.relative_path, e);
+            }
+        }
+    }
+
+    pulled
 }
 
 /// Update the root directory with new file entries
@@ -354,27 +389,30 @@ fn load_or_create_snapshot(paths: &PushworkPaths, root_url: &AutomergeUrl) -> Sn
 }
 
 /// Print sync summary
-fn print_summary(new_count: usize, modified_count: usize, skipped_count: usize) {
-    let total_synced = new_count + modified_count;
+fn print_summary(pushed_new: usize, pushed_modified: usize, pulled: usize) {
+    let total_pushed = pushed_new + pushed_modified;
+    let total = total_pushed + pulled;
 
-    if total_synced == 0 {
-        println!("\nNo files were synced.");
+    if total == 0 {
+        println!("\nNo changes.");
         return;
     }
 
     let mut parts = Vec::new();
-    if new_count > 0 {
-        parts.push(format!("{} new", new_count));
+    if pushed_new > 0 {
+        parts.push(format!("{} new", pushed_new));
     }
-    if modified_count > 0 {
-        parts.push(format!("{} modified", modified_count));
+    if pushed_modified > 0 {
+        parts.push(format!("{} modified", pushed_modified));
     }
-    // skipped_count is now always 0 since we support binary files
-    let _ = skipped_count;
-
-    println!(
-        "\nDone! {} file(s) synced ({}).",
-        total_synced,
-        parts.join(", ")
-    );
+    if total_pushed > 0 {
+        println!(
+            "\nPushed {} file(s) ({}).",
+            total_pushed,
+            parts.join(", ")
+        );
+    }
+    if pulled > 0 {
+        println!("Pulled {} file(s).", pulled);
+    }
 }

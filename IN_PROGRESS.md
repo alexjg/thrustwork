@@ -105,14 +105,20 @@ helpers. Error handling uses the existing `SyncError` type.
 
 Wire up remote change detection and application in the sync command.
 
-- [ ] After pushing local changes, detect remote changes
-- [ ] For each remote change, read content and write to disk
-- [ ] Update snapshot with new heads after applying
-- [ ] Print summary of pulled files
+- [x] After pushing local changes, detect remote changes
+- [x] For each remote change, read content and write to disk
+- [x] Update snapshot with new heads after applying
+- [x] Print summary of pulled files
 
 **Notes:**
 - This completes the two-way sync: push local, then pull remote
 - Order matters: push first, then pull (to avoid overwriting local changes)
+
+**Implementation:** Restructured `sync.rs` execute function to:
+1. Process local changes (new + modified) and push to server
+2. After push, call `detect_remote_changes()` to find files with different heads
+3. Call `process_remote_changes()` to write content to disk and update snapshot
+4. Updated `print_summary()` to show both pushed and pulled counts
 
 ---
 
