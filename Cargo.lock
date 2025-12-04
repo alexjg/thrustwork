@@ -1310,6 +1310,7 @@ version = "0.1.0"
 dependencies = [
  "automerge",
  "autosurgeon",
+ "bs58",
  "clap",
  "futures",
  "glob",

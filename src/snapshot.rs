@@ -13,7 +13,9 @@ use thiserror::Error;
 /// The snapshot file name
 const SNAPSHOT_FILENAME: &str = "snapshot.json";
 
-/// Serialize/deserialize Vec<ChangeHash> as Vec<String> (hex-encoded)
+/// Serialize/deserialize Vec<ChangeHash> as Vec<String> (base58check-encoded)
+///
+/// This matches the format used by automerge-repo in JavaScript (UrlHeads).
 mod change_hash_vec {
     use automerge::ChangeHash;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -22,19 +24,26 @@ mod change_hash_vec {
     where
         S: Serializer,
     {
-        let hex_strings: Vec<String> = hashes.iter().map(|h| h.to_string()).collect();
-        hex_strings.serialize(serializer)
+        let encoded: Vec<String> = hashes
+            .iter()
+            .map(|h| bs58::encode(h.as_ref()).with_check().into_string())
+            .collect();
+        encoded.serialize(serializer)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ChangeHash>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let hex_strings: Vec<String> = Vec::deserialize(deserializer)?;
-        hex_strings
+        let encoded: Vec<String> = Vec::deserialize(deserializer)?;
+        encoded
             .into_iter()
             .map(|s| {
-                s.parse::<ChangeHash>()
+                let bytes = bs58::decode(&s)
+                    .with_check(None)
+                    .into_vec()
+                    .map_err(|e| serde::de::Error::custom(format!("invalid base58: {}", e)))?;
+                ChangeHash::try_from(bytes.as_slice())
                     .map_err(|e| serde::de::Error::custom(format!("invalid change hash: {}", e)))
             })
             .collect()
