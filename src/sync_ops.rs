@@ -178,26 +178,6 @@ pub fn get_document_heads(handle: &DocHandle) -> Vec<ChangeHash> {
     handle.with_document(|doc| doc.get_heads())
 }
 
-/// Get the current content of a file document
-///
-/// Returns raw bytes which works for both text and binary files.
-pub fn get_file_content(handle: &DocHandle) -> Result<Vec<u8>, SyncError> {
-    handle.with_document(|doc| {
-        let file_doc: FileDocument =
-            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
-        Ok(file_doc.content_bytes().to_vec())
-    })
-}
-
-/// Get the current permissions from a file document
-pub fn get_file_doc_permissions(handle: &DocHandle) -> Result<i64, SyncError> {
-    handle.with_document(|doc| {
-        let file_doc: FileDocument =
-            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
-        Ok(file_doc.metadata.permissions)
-    })
-}
-
 /// Get the content of a file document at specific heads
 ///
 /// This forks the document at the given heads and extracts the content,
@@ -275,6 +255,41 @@ pub fn create_snapshot_file_entry(
         extension: file_info.extension.clone(),
         mime_type: file_info.mime_type.clone(),
     }
+}
+
+/// Write remote file content to the local filesystem
+///
+/// Reads the current content from the document and writes it to the specified path.
+/// Also sets file permissions on Unix systems.
+pub fn write_remote_file_to_disk(handle: &DocHandle, path: &Path) -> Result<(), SyncError> {
+    // Hydrate once to get both content and permissions
+    let (content, permissions) = handle.with_document(|doc| {
+        let file_doc: FileDocument =
+            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+        Ok((file_doc.content_bytes().to_vec(), file_doc.metadata.permissions))
+    })?;
+
+    // Write to disk
+    std::fs::write(path, &content).map_err(|e| SyncError::ReadFile {
+        path: path.to_string_lossy().to_string(),
+        source: e,
+    })?;
+
+    // Set permissions (Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(permissions as u32);
+        if let Err(e) = std::fs::set_permissions(path, perms) {
+            eprintln!(
+                "  Warning: Failed to set permissions for '{}': {}",
+                path.display(),
+                e
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -465,28 +480,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_file_content() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.txt");
-        fs::write(&file_path, "Hello content").unwrap();
-
-        let file_info = FileInfo::from_path(&file_path);
-        let repo = Repo::build_tokio().load().await;
-
-        let created = create_file_document(&repo, &file_path, &file_info)
-            .await
-            .unwrap();
-
-        // Get current content
-        let content = get_file_content(&created.handle).unwrap();
-        assert_eq!(content, b"Hello content");
-
-        // Get current permissions
-        let perms = get_file_doc_permissions(&created.handle).unwrap();
-        assert!(perms > 0); // Should have some permissions set
-    }
-
-    #[tokio::test]
     async fn test_update_file_document() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
@@ -576,5 +569,61 @@ mod tests {
             created.handle.with_document(|doc| hydrate(doc).unwrap());
         assert!(file_doc.is_binary());
         assert_eq!(file_doc.content_bytes(), &new_data);
+    }
+
+    #[tokio::test]
+    async fn test_write_remote_file_to_disk() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("source.txt");
+        fs::write(&source_path, "Remote content").unwrap();
+
+        let file_info = FileInfo::from_path(&source_path);
+        let repo = Repo::build_tokio().load().await;
+
+        // Create file document
+        let created = create_file_document(&repo, &source_path, &file_info)
+            .await
+            .unwrap();
+
+        // Write to a new path
+        let dest_path = temp_dir.path().join("dest.txt");
+        write_remote_file_to_disk(&created.handle, &dest_path).unwrap();
+
+        // Verify content was written
+        let written_content = fs::read(&dest_path).unwrap();
+        assert_eq!(written_content, b"Remote content");
+
+        // Verify permissions were set (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let source_perms = fs::metadata(&source_path).unwrap().permissions().mode();
+            let dest_perms = fs::metadata(&dest_path).unwrap().permissions().mode();
+            assert_eq!(source_perms & 0o777, dest_perms & 0o777);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_remote_file_to_disk_binary() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("image.png");
+        let binary_data = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x11, 0x22];
+        fs::write(&source_path, binary_data).unwrap();
+
+        let file_info = FileInfo::from_path(&source_path);
+        let repo = Repo::build_tokio().load().await;
+
+        // Create binary file document
+        let created = create_file_document(&repo, &source_path, &file_info)
+            .await
+            .unwrap();
+
+        // Write to a new path
+        let dest_path = temp_dir.path().join("copy.png");
+        write_remote_file_to_disk(&created.handle, &dest_path).unwrap();
+
+        // Verify binary content was written correctly
+        let written_content = fs::read(&dest_path).unwrap();
+        assert_eq!(written_content, binary_data);
     }
 }

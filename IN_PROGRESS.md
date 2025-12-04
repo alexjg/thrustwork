@@ -76,9 +76,9 @@ Extract current content from a remotely-changed document.
 - Similar to `get_file_content_at_heads()` but uses current state
 - May be able to reuse `content_bytes()` method directly
 
-**Implementation:** Added `get_file_content()` and `get_file_doc_permissions()` functions
-in `sync_ops.rs`. These hydrate the document and extract content/permissions directly
-without forking.
+**Implementation:** Initially added `get_file_content()` and `get_file_doc_permissions()`
+helper functions in `sync_ops.rs`. These were later removed and inlined into
+`write_remote_file_to_disk()` to avoid double-hydration overhead.
 
 ---
 
@@ -86,13 +86,18 @@ without forking.
 
 Apply remote file changes to the local filesystem.
 
-- [ ] Write new content to the file path from snapshot
-- [ ] Preserve or update file permissions from document
-- [ ] Handle errors (permission denied, disk full, etc.)
+- [x] Write new content to the file path from snapshot
+- [x] Preserve or update file permissions from document
+- [x] Handle errors (permission denied, disk full, etc.)
 
 **Notes:**
 - Use `std::fs::write()` which works for both text and binary
 - May need to handle file that was deleted locally but exists remotely
+
+**Implementation:** Added `write_remote_file_to_disk()` function in `sync_ops.rs`. The
+function reads content from the document, writes it to the specified path, and sets Unix
+permissions. Uses the existing `get_file_content()` and `get_file_doc_permissions()`
+helpers. Error handling uses the existing `SyncError` type.
 
 ---
 
