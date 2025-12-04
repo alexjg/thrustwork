@@ -36,229 +36,133 @@ The overall design we are working on is described in DESIGN.md and the separate 
 
 ---
 
-## Phase 6: Detect and Sync Local Changes
+## Phase 8: Detect and Apply Remote Changes
 
-**Goal**: Detect when a tracked file has changed and push the update.
+**Goal**: Detect when a remote file has changed and pull the update.
 
-**Deliverable**: Modify a synced file, run sync, change is pushed.
+**Deliverable**: When a file changes remotely, sync pulls it.
 
 ---
 
-### Task 6.1: Load Document at Snapshot Heads
+### Task 8.1: Detect Remote Changes
 
-Implement reading the file content as it was at the last sync.
+Compare document heads against snapshot heads to find files changed remotely.
 
-- [x] Add function to load a file document at specific heads
-- [x] Use `Automerge::fork_at()` or similar to get document state at heads
-- [x] Extract content from the historical document state
-- [x] Add tests for loading at heads
+- [ ] Add function to compare current document heads with snapshot heads
+- [ ] Return list of files where document has newer heads than snapshot
+- [ ] Handle case where document heads are the same (no change)
+- [ ] Handle case where document heads are different (remote change)
 
 **Notes:**
-- Need to compare current local file against what was synced last
-- The snapshot stores heads from the last sync
-- This allows detecting if local file changed since last sync
+- A file has remote changes if `doc.get_heads() != snapshot_entry.head`
+- This is the inverse of local change detection (which compares disk content)
+- Need to load each tracked document and check its heads
 
 ---
 
-### Task 6.2: Detect Local File Changes
+### Task 8.2: Read Remote File Content
 
-Compare local file content against snapshot state.
+Extract current content from a remotely-changed document.
 
-- [x] For each file in snapshot, check if it still exists on disk
-- [x] Read current file content from disk
-- [x] Load document content at snapshot heads
-- [x] Compare: if different, mark as LOCAL_ONLY change
-- [x] Add `modified_files` detection to scanner
+- [ ] Add function to read current content from a document (not at specific heads)
+- [ ] Return bytes (works for both text and binary)
+- [ ] Reuse existing hydration logic from FileDocument
 
 **Notes:**
-- A file is modified if disk content differs from document-at-snapshot-heads
-- This is Phase 6's focus; remote changes come in Phase 7
+- Similar to `get_file_content_at_heads()` but uses current state
+- May be able to reuse `content_bytes()` method directly
 
 ---
 
-### Task 6.3: Update Existing File Document
+### Task 8.3: Write Remote Changes to Disk
 
-Update a file document with new local content.
+Apply remote file changes to the local filesystem.
 
-- [x] Load the existing file document by URL from snapshot
-- [x] Update the `content` field with new file content
-- [x] Update `metadata.permissions` if changed
-- [x] Reconcile changes back to document
-- [x] Add `update_file_document()` function to sync_ops
+- [ ] Write new content to the file path from snapshot
+- [ ] Preserve or update file permissions from document
+- [ ] Handle errors (permission denied, disk full, etc.)
 
 **Notes:**
-- Don't create a new document - update the existing one
-- This preserves the document URL and history
+- Use `std::fs::write()` which works for both text and binary
+- May need to handle file that was deleted locally but exists remotely
 
 ---
 
-**Phase 6 Complete.**
+### Task 8.4: Integrate Remote Changes into Sync
 
----
+Wire up remote change detection and application in the sync command.
 
-## Phase 7: Binary File Support
-
-**Goal**: Support syncing binary files (images, PDFs, etc.) in addition to text.
-
-**Deliverable**: Binary files can be pushed, pulled, and synced like text files.
-
----
-
-### Task 7.1: Create Binary FileDocument Type
-
-Add a new document type for binary files using Automerge Bytes.
-
-- [x] Add `BinaryFileDocument` struct using `autosurgeon::ByteVec` for content
-- [x] Or modify `FileDocument` to use an enum for content (text vs binary)
-- [x] Add constructor for binary files
-- [x] Add tests for binary document serialization roundtrip
+- [ ] After pushing local changes, detect remote changes
+- [ ] For each remote change, read content and write to disk
+- [ ] Update snapshot with new heads after applying
+- [ ] Print summary of pulled files
 
 **Notes:**
-- Pushwork uses the same schema but with `content` as Bytes instead of String
-- Use an enum `FileContent { Text(String), Binary(Vec<u8>) }` with custom Reconcile/Hydrate
-- Reconcile: write String or Bytes depending on variant
-- Hydrate: inspect Automerge value type and construct appropriate variant
-- This keeps FileDocument as a single struct, avoids field duplication
-
-**Implementation:** Added `FileContent` enum with custom `Reconcile` and `Hydrate` implementations
-in `src/documents.rs`. The enum switches between String and Bytes based on the variant.
-`FileDocument` now uses `FileContent` for its content field.
+- This completes the two-way sync: push local, then pull remote
+- Order matters: push first, then pull (to avoid overwriting local changes)
 
 ---
 
-### Task 7.2: Add Binary File Reading
+### Task 8.5: Handle BOTH_CHANGED Scenario
 
-**SKIPPED** - This is just a trivial wrapper around `std::fs::read()`. We'll use
-`std::fs::read()` directly where needed.
+Detect and handle files changed both locally and remotely.
 
----
-
-### Task 7.3: Create Binary File Documents
-
-Update sync_ops to create documents for binary files.
-
-- [x] Modify `create_file_document()` to handle both text and binary
-- [x] Use `FileInfo.is_text` to choose the right content type
-- [x] Create binary document with ByteVec content
-- [x] Add tests for creating binary file documents
+- [ ] Detect when a file has both local and remote changes
+- [ ] For now: prefer remote (pull overwrites local)
+- [ ] Print warning when this happens
+- [ ] Future: merge text files, prefer remote for binary
 
 **Notes:**
-- Remove the "binary files not yet supported" error
-- The function should work for any file type
-
-**Implementation:** Updated `create_file_document()` in `sync_ops.rs` to:
-- Read all files as bytes using `std::fs::read()`
-- Use `FileDocument::new()` for text files (converting bytes to String)
-- Use `FileDocument::new_binary()` for binary files (raw bytes)
-- Removed `SyncError::NotTextFile` variant - no longer needed
-- Updated test to verify binary document creation works correctly
+- This is a conflict scenario
+- Phase 14 will implement proper merging
+- For now, simple "remote wins" policy is acceptable
 
 ---
 
-### Task 7.4: Update Binary File Documents
+### Task 8.6: Verification Test
 
-Support updating existing binary file documents.
+Test the full remote change flow.
 
-- [x] Modify `update_file_document()` to handle binary content
-- [x] Read binary content from disk when updating
-- [x] Add tests for updating binary documents
-
-**Notes:**
-- Similar to text update but with raw bytes
-- Need to handle mixed scenarios (was text, now binary?)
-
-**Implementation:** Changed `update_file_document()` to accept `FileContent` instead
-of `&str`. Updated call site in `sync.rs` to wrap text content. Added test for
-updating binary documents.
-
----
-
-### Task 7.5: Clone Binary Files
-
-Support cloning/pulling binary files from remote.
-
-- [x] Update clone module to handle binary file documents
-- [x] Write binary content to disk (not as UTF-8 string)
-- [x] Ensure file permissions are set correctly
-- [ ] Add tests for cloning binary files (deferred - requires integration test)
-
-**Notes:**
-- Currently clone writes with `fs::write()` which works for both text and binary
-- Need to extract bytes from ByteVec content
-
-**Implementation:** Changed `LoadedFile.content` from `String` to `Vec<u8>` and
-updated `load_single_file()` to use `content_bytes()`. The `write_files_to_disk()`
-function already used `std::fs::write()` which accepts `&[u8]`, so no changes needed there.
-
----
-
-### Task 7.6: Wire Up Binary Support in Sync
-
-Remove binary file skipping and enable full binary support.
-
-- [x] Remove "Skipping (binary)" logic from sync module
-- [x] Update change detection to work with binary files
-- [x] Ensure snapshot tracks binary files correctly
-- [ ] Test end-to-end binary file sync (deferred to Task 7.7)
-
-**Notes:**
-- The `FileInfo.is_text` field is still useful for choosing content type
-- But we no longer skip binary files
-
-**Implementation:**
-- Removed binary file skipping from `process_new_files()` in sync.rs
-- Changed `ModifiedFile.new_content` from `String` to `Vec<u8>`
-- Changed `get_file_content_at_heads()` to return `Vec<u8>` instead of `String`
-- Updated `detect_modified_files()` to use `std::fs::read()` for byte comparison
-- Updated `process_modified_files()` to use `FileContent::text()` or `FileContent::binary()`
-  based on MIME type
-
----
-
-### Task 7.7: Interop Verification
-
-Verify binary files sync correctly with pushwork.
-
-- [ ] Create a directory with pushwork containing an image
-- [ ] Clone with thrustwork, verify image is byte-for-byte identical
-- [ ] Modify image with thrustwork, sync
-- [ ] Verify pushwork sees the updated image
+- [ ] Set up two directories syncing the same root
+- [ ] Modify a file in directory A, sync
+- [ ] Sync in directory B, verify file is updated
+- [ ] Test with both text and binary files
 
 **Verification:**
 ```
-# Setup: Create with pushwork including a binary file
-$ mkdir /tmp/pushwork-binary && cd /tmp/pushwork-binary
-$ pushwork init
-$ cp /path/to/test.png .
-$ pushwork sync
+# Terminal 1: Create and sync
+mkdir /tmp/client-a && cd /tmp/client-a
+thrustwork init
+echo "original" > test.txt
+thrustwork sync
+# Note the root URL
 
-# Clone with thrustwork
-$ mkdir /tmp/thrustwork-binary && cd /tmp/thrustwork-binary
-$ thrustwork clone <url>
-$ diff test.png /tmp/pushwork-binary/test.png  # Should be identical
+# Terminal 2: Clone
+mkdir /tmp/client-b && cd /tmp/client-b
+thrustwork clone <url>
+cat test.txt  # Should show "original"
 
-# Modify and sync back
-$ convert test.png -resize 50% test.png  # or any image edit
-$ thrustwork sync
+# Terminal 1: Modify and sync
+echo "modified by A" > test.txt
+thrustwork sync
 
-# Verify with pushwork
-$ cd /tmp/pushwork-binary
-$ pushwork sync
-$ diff test.png /tmp/thrustwork-binary/test.png  # Should match
+# Terminal 2: Pull changes
+thrustwork sync
+cat test.txt  # Should show "modified by A"
 ```
 
 ---
 
-### Phase 7 Completion Checklist
+### Phase 8 Completion Checklist
 
-- [ ] Binary file documents can be created with ByteVec content
-- [ ] Binary files can be read from disk
-- [ ] Binary files can be pushed (create and update)
-- [ ] Binary files can be cloned/pulled
-- [ ] No more "binary not supported" skipping
-- [ ] Binary files sync correctly with pushwork
+- [ ] Remote changes detected by comparing document heads to snapshot
+- [ ] Remote file content can be read from documents
+- [ ] Remote changes are written to local filesystem
+- [ ] Sync command pulls remote changes after pushing local
+- [ ] BOTH_CHANGED scenario handled (remote wins for now)
+- [ ] Two-client sync verified working
 
-**Phase 7 complete when all items checked. Proceed to Phase 8.**
+**Phase 8 complete when all items checked. Proceed to Phase 9.**
 
 ---
 
