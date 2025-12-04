@@ -206,7 +206,7 @@ pub fn get_file_content_at_heads(
 /// the changes back. Returns the new heads after the update.
 pub fn update_file_document(
     handle: &DocHandle,
-    new_content: &str,
+    new_content: FileContent,
     new_permissions: Option<i64>,
 ) -> Result<Vec<ChangeHash>, SyncError> {
     handle.with_document(|doc| {
@@ -214,8 +214,8 @@ pub fn update_file_document(
         let mut file_doc: FileDocument =
             hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
 
-        // Update content (keeping it as text for now)
-        file_doc.content = FileContent::text(new_content);
+        // Update content
+        file_doc.content = new_content;
 
         // Update permissions if provided
         if let Some(perms) = new_permissions {
@@ -461,7 +461,7 @@ mod tests {
 
         // Update the document
         let new_heads =
-            update_file_document(&created.handle, "Updated content", Some(0o755)).unwrap();
+            update_file_document(&created.handle, FileContent::text("Updated content"), Some(0o755)).unwrap();
 
         // Heads should have changed
         assert_ne!(initial_heads, new_heads);
@@ -494,12 +494,44 @@ mod tests {
             });
 
         // Update content only (no permissions change)
-        update_file_document(&created.handle, "New content", None).unwrap();
+        update_file_document(&created.handle, FileContent::text("New content"), None).unwrap();
 
         // Permissions should be unchanged
         let file_doc: FileDocument =
             created.handle.with_document(|doc| hydrate(doc).unwrap());
         assert_eq!(file_doc.content_string(), "New content");
         assert_eq!(file_doc.metadata.permissions, original_perms);
+    }
+
+    #[tokio::test]
+    async fn test_update_file_document_binary() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("image.png");
+        let initial_data = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        fs::write(&file_path, initial_data).unwrap();
+
+        let file_info = FileInfo::from_path(&file_path);
+        let repo = Repo::build_tokio().load().await;
+
+        // Create initial binary file document
+        let created = create_file_document(&repo, &file_path, &file_info)
+            .await
+            .unwrap();
+
+        let initial_heads = get_document_heads(&created.handle);
+
+        // Update with new binary content
+        let new_data: Vec<u8> = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05];
+        let new_heads =
+            update_file_document(&created.handle, FileContent::binary(new_data.clone()), None).unwrap();
+
+        // Heads should have changed
+        assert_ne!(initial_heads, new_heads);
+
+        // Content should be updated
+        let file_doc: FileDocument =
+            created.handle.with_document(|doc| hydrate(doc).unwrap());
+        assert!(file_doc.is_binary());
+        assert_eq!(file_doc.content_bytes(), &new_data);
     }
 }

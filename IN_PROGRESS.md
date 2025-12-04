@@ -159,13 +159,17 @@ Update sync_ops to create documents for binary files.
 
 Support updating existing binary file documents.
 
-- [ ] Modify `update_file_document()` to handle binary content
-- [ ] Read binary content from disk when updating
-- [ ] Add tests for updating binary documents
+- [x] Modify `update_file_document()` to handle binary content
+- [x] Read binary content from disk when updating
+- [x] Add tests for updating binary documents
 
 **Notes:**
 - Similar to text update but with raw bytes
 - Need to handle mixed scenarios (was text, now binary?)
+
+**Implementation:** Changed `update_file_document()` to accept `FileContent` instead
+of `&str`. Updated call site in `sync.rs` to wrap text content. Added test for
+updating binary documents.
 
 ---
 

@@ -11,7 +11,7 @@ use tokio_tungstenite::connect_async;
 
 use crate::changes::{detect_modified_files, ModifiedFile};
 use crate::config::DirectoryConfig;
-use crate::documents::FileDocument;
+use crate::documents::{FileContent, FileDocument};
 use crate::files::{self, FileInfo};
 use crate::init::PushworkPaths;
 use crate::scanner::{self, FileToSync};
@@ -213,8 +213,9 @@ async fn process_modified_files(
             .ok()
             .map(|p| p as i64);
 
-        // Update the document
-        match sync_ops::update_file_document(&handle, &modified.new_content, new_perms) {
+        // Update the document (currently text only - binary handled in later phase)
+        let content = FileContent::text(&modified.new_content);
+        match sync_ops::update_file_document(&handle, content, new_perms) {
             Ok(new_heads) => {
                 entries.push((modified.relative_path.clone(), new_heads));
                 handles.push(handle);
