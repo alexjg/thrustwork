@@ -7,6 +7,7 @@ edition = "2024"
 automerge = "0.7"
 autosurgeon = "0.10.0"
 clap = { version = "4.5.53", features = ["derive"] }
+glob = "0.3.3"
 mime_guess = "2.0.5"
 #samod = { version = "0.5", features = ["tokio", "tungstenite"] }
 samod = { path = "/home/alex/Projects/automerge/samod/samod", features = ["tokio", "tungstenite"] }
@@ -15,6 +16,7 @@ serde_json = "1.0.145"
 thiserror = "2.0.17"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
+walkdir = "2.5.0"
 
 [dev-dependencies]
 tempfile = "3.23.0"

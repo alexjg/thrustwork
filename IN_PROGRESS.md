@@ -110,15 +110,18 @@ Add utilities for reading local files and detecting their type.
 
 Implement scanning to find files that need to be pushed.
 
-- [ ] Create function to scan directory recursively
-- [ ] Filter out excluded patterns from config
-- [ ] Compare against empty snapshot (all files are new)
-- [ ] Return list of files to push with their paths
+- [x] Create function to scan directory recursively
+- [x] Filter out excluded patterns from config
+- [x] Compare against empty snapshot (all files are new)
+- [x] Return list of files to push with their paths
 
 **Notes:**
-- Use `walkdir` or `std::fs::read_dir` recursively
-- Respect `.pushwork/config.json` exclude patterns
-- For Phase 4, we only care about new files (not modifications)
+- Created `src/scanner.rs` with `FileToSync`, `ScanResult` structs
+- Added `walkdir` and `glob` crate dependencies
+- `scan_directory()` recursively finds files, respecting exclude patterns
+- `scan_for_changes()` compares against snapshot to find new/modified/deleted files
+- Exclude patterns match against path components (e.g., `.git` excludes `.git/config`)
+- 39 tests passing (7 new scanner tests)
 
 ---
 

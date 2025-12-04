@@ -9,6 +9,7 @@ mod config;
 mod documents;
 mod files;
 mod init;
+mod scanner;
 mod snapshot;
 
 use documents::{DirectoryDocument, DirectoryEntry, FileDocument};
