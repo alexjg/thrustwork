@@ -178,6 +178,26 @@ pub fn get_document_heads(handle: &DocHandle) -> Vec<ChangeHash> {
     handle.with_document(|doc| doc.get_heads())
 }
 
+/// Get the current content of a file document
+///
+/// Returns raw bytes which works for both text and binary files.
+pub fn get_file_content(handle: &DocHandle) -> Result<Vec<u8>, SyncError> {
+    handle.with_document(|doc| {
+        let file_doc: FileDocument =
+            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+        Ok(file_doc.content_bytes().to_vec())
+    })
+}
+
+/// Get the current permissions from a file document
+pub fn get_file_doc_permissions(handle: &DocHandle) -> Result<i64, SyncError> {
+    handle.with_document(|doc| {
+        let file_doc: FileDocument =
+            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+        Ok(file_doc.metadata.permissions)
+    })
+}
+
 /// Get the content of a file document at specific heads
 ///
 /// This forks the document at the given heads and extracts the content,
@@ -442,6 +462,28 @@ mod tests {
         // But content at original heads should still be original
         let old_content = get_file_content_at_heads(&created.handle, &initial_heads).unwrap();
         assert_eq!(old_content, b"Original content");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        fs::write(&file_path, "Hello content").unwrap();
+
+        let file_info = FileInfo::from_path(&file_path);
+        let repo = Repo::build_tokio().load().await;
+
+        let created = create_file_document(&repo, &file_path, &file_info)
+            .await
+            .unwrap();
+
+        // Get current content
+        let content = get_file_content(&created.handle).unwrap();
+        assert_eq!(content, b"Hello content");
+
+        // Get current permissions
+        let perms = get_file_doc_permissions(&created.handle).unwrap();
+        assert!(perms > 0); // Should have some permissions set
     }
 
     #[tokio::test]

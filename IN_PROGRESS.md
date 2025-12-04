@@ -68,13 +68,17 @@ document, and compares heads. Returns files where heads differ.
 
 Extract current content from a remotely-changed document.
 
-- [ ] Add function to read current content from a document (not at specific heads)
-- [ ] Return bytes (works for both text and binary)
-- [ ] Reuse existing hydration logic from FileDocument
+- [x] Add function to read current content from a document (not at specific heads)
+- [x] Return bytes (works for both text and binary)
+- [x] Reuse existing hydration logic from FileDocument
 
 **Notes:**
 - Similar to `get_file_content_at_heads()` but uses current state
 - May be able to reuse `content_bytes()` method directly
+
+**Implementation:** Added `get_file_content()` and `get_file_doc_permissions()` functions
+in `sync_ops.rs`. These hydrate the document and extract content/permissions directly
+without forking.
 
 ---
 
