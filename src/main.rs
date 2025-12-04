@@ -1,7 +1,7 @@
 use automerge::Automerge;
 use autosurgeon::{hydrate, reconcile};
 use clap::{Parser, Subcommand};
-use samod::{storage::TokioFilesystemStorage, ConnDirection, DocumentId, Repo};
+use samod::{storage::TokioFilesystemStorage, AutomergeUrl, ConnDirection, DocHandle, DocumentId, Repo};
 use std::str::FromStr;
 use tokio_tungstenite::connect_async;
 
@@ -14,6 +14,7 @@ mod snapshot;
 mod sync_ops;
 
 use documents::{DirectoryDocument, DirectoryEntry, FileDocument};
+use snapshot::Snapshot;
 
 const SYNC_SERVER_URL: &str = "wss://sync3.automerge.org";
 
@@ -264,8 +265,13 @@ async fn main() {
                 std::process::exit(1);
             });
 
-            let root_url = config.root_directory_url.as_ref().unwrap_or_else(|| {
+            let root_url_str = config.root_directory_url.as_ref().unwrap_or_else(|| {
                 eprintln!("No root directory URL in config - directory not properly initialized");
+                std::process::exit(1);
+            });
+
+            let root_url: AutomergeUrl = root_url_str.parse().unwrap_or_else(|e| {
+                eprintln!("Invalid root directory URL: {}", e);
                 std::process::exit(1);
             });
 
@@ -275,6 +281,7 @@ async fn main() {
 
             // Connect to sync server
             let sync_url = config.sync_server_url();
+            println!("Connecting to sync server: {}", sync_url);
             let (ws_stream, _response) = connect_async(sync_url).await.unwrap_or_else(|e| {
                 eprintln!("Failed to connect to sync server: {}", e);
                 std::process::exit(1);
@@ -292,11 +299,16 @@ async fn main() {
                 std::process::exit(1);
             });
 
+            let conn_id = conn.id();
+
             // Load the root directory document
-            let doc_id_str = root_url
+            let doc_id = root_url_str
                 .strip_prefix("automerge:")
-                .expect("URL must start with 'automerge:'");
-            let doc_id = DocumentId::from_str(doc_id_str).expect("Invalid document ID");
+                .and_then(|s| DocumentId::from_str(s).ok())
+                .unwrap_or_else(|| {
+                    eprintln!("Invalid root directory URL");
+                    std::process::exit(1);
+                });
 
             let dir_handle = repo
                 .find(doc_id)
@@ -307,12 +319,124 @@ async fn main() {
                     std::process::exit(1);
                 });
 
-            let dir: DirectoryDocument = dir_handle.with_document(|doc| {
-                hydrate(doc).expect("Failed to hydrate directory document")
+            // Load or create snapshot
+            let snapshot_path = Snapshot::path_in(&paths.pushwork_dir);
+            let mut snapshot = if snapshot_path.exists() {
+                Snapshot::load(&snapshot_path).unwrap_or_else(|e| {
+                    eprintln!("Warning: Failed to load snapshot, starting fresh: {}", e);
+                    Snapshot::new(paths.root.clone(), Some(root_url.clone()))
+                })
+            } else {
+                Snapshot::new(paths.root.clone(), Some(root_url.clone()))
+            };
+
+            // Scan for changes
+            let scan_result = scanner::scan_for_changes(
+                &paths.root,
+                &config.exclude_patterns,
+                &snapshot,
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to scan directory: {}", e);
+                std::process::exit(1);
             });
 
-            println!("Root directory loaded ({} entries)", dir.docs.len());
-            println!("\nSync not yet implemented - this is just the skeleton.");
+            if !scan_result.has_changes() {
+                println!("No changes to sync.");
+                return;
+            }
+
+            println!("Found {} new file(s) to sync", scan_result.new_files.len());
+
+            // Create file documents for new files
+            let mut created_files: Vec<(String, AutomergeUrl, DocHandle, files::FileInfo)> = Vec::new();
+            let mut skipped_count = 0;
+
+            for file in &scan_result.new_files {
+                // Skip binary files for Phase 4
+                if !file.info.is_text {
+                    println!("  Skipping (binary): {}", file.relative_path);
+                    skipped_count += 1;
+                    continue;
+                }
+
+                println!("  Pushing: {}", file.relative_path);
+
+                match sync_ops::create_file_document(&repo, &file.absolute_path, &file.info).await {
+                    Ok(created) => {
+                        created_files.push((
+                            file.relative_path.clone(),
+                            created.url,
+                            created.handle,
+                            file.info.clone(),
+                        ));
+                    }
+                    Err(e) => {
+                        eprintln!("  Error creating document for {}: {}", file.relative_path, e);
+                    }
+                }
+            }
+
+            if created_files.is_empty() {
+                println!("No files were synced.");
+                return;
+            }
+
+            // Update root directory with new file entries
+            let new_entries: Vec<(String, AutomergeUrl)> = created_files
+                .iter()
+                .map(|(_, url, handle, _)| {
+                    // Get the filename from the handle
+                    let name: String = handle.with_document(|doc| {
+                        let file_doc: FileDocument = hydrate(doc).expect("Failed to hydrate file");
+                        file_doc.name_str().to_string()
+                    });
+                    (name, url.clone())
+                })
+                .collect();
+
+            println!("Updating root directory...");
+            sync_ops::update_directory_with_files(&dir_handle, &new_entries).unwrap_or_else(|e| {
+                eprintln!("Failed to update root directory: {}", e);
+                std::process::exit(1);
+            });
+
+            // Wait for all documents to sync
+            println!("Waiting for sync to complete...");
+            let mut all_handles: Vec<&DocHandle> = created_files
+                .iter()
+                .map(|(_, _, handle, _)| handle)
+                .collect();
+            all_handles.push(&dir_handle);
+
+            sync_ops::wait_for_all_synced(&all_handles, conn_id).await;
+
+            // Update snapshot with synced files
+            for (relative_path, _, handle, info) in &created_files {
+                let entry = sync_ops::create_snapshot_file_entry(
+                    handle,
+                    paths.root.join(relative_path),
+                    info,
+                );
+                snapshot.add_file(relative_path.clone(), entry);
+            }
+
+            snapshot.update_timestamp();
+            snapshot.save(&snapshot_path).unwrap_or_else(|e| {
+                eprintln!("Warning: Failed to save snapshot: {}", e);
+            });
+
+            // Print summary
+            let synced_count = created_files.len();
+            println!(
+                "\nDone! {} file(s) synced{}.",
+                synced_count,
+                if skipped_count > 0 {
+                    format!(", {} skipped (binary)", skipped_count)
+                } else {
+                    String::new()
+                }
+            );
         }
         Commands::CreateTest => {
             // Initialize a samod Repo with in-memory storage
