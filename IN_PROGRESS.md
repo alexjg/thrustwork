@@ -92,80 +92,153 @@ Update a file document with new local content.
 
 ---
 
-### Task 6.4: Update Snapshot After Push
-
-Update snapshot with new document heads after pushing changes.
-
-- [x] After updating document, get new heads
-- [x] Update the file's entry in snapshot with new heads
-- [x] Save snapshot to disk
-
-**Notes:**
-- The snapshot must reflect the new state after sync
-- New heads indicate what version we last synced
+**Phase 6 Complete.**
 
 ---
 
-### Task 6.5: Wire Up Modified File Sync
+## Phase 7: Binary File Support
 
-Integrate change detection into the sync command.
+**Goal**: Support syncing binary files (images, PDFs, etc.) in addition to text.
 
-- [x] Load existing snapshot at start of sync
-- [x] Run change detection (new files + modified files)
-- [x] For new files: create documents (existing behavior)
-- [x] For modified files: update documents (new behavior)
-- [x] Wait for sync to complete
-- [x] Update snapshot with all changes
-
-**Notes:**
-- Sync command now handles both new and modified files
-- The flow: detect changes → push changes → wait for sync → update snapshot
+**Deliverable**: Binary files can be pushed, pulled, and synced like text files.
 
 ---
 
-### Task 6.6: Interop Verification
+### Task 7.1: Create Binary FileDocument Type
 
-Verify local changes sync correctly with pushwork.
+Add a new document type for binary files using Automerge Bytes.
 
-- [ ] Clone a pushwork directory with thrustwork
-- [ ] Modify a file locally
-- [ ] Run `thrustwork sync`
-- [ ] Verify pushwork sees the updated content
+- [ ] Add `BinaryFileDocument` struct using `autosurgeon::ByteVec` for content
+- [ ] Or modify `FileDocument` to use an enum for content (text vs binary)
+- [ ] Add constructor for binary files
+- [ ] Add tests for binary document serialization roundtrip
+
+**Notes:**
+- Pushwork uses the same schema but with `content` as Bytes instead of String
+- Use an enum `FileContent { Text(String), Binary(Vec<u8>) }` with custom Reconcile/Hydrate
+- Reconcile: write String or Bytes depending on variant
+- Hydrate: inspect Automerge value type and construct appropriate variant
+- This keeps FileDocument as a single struct, avoids field duplication
+
+---
+
+### Task 7.2: Add Binary File Reading
+
+Implement reading binary files from disk.
+
+- [ ] Add `read_binary_file()` function to files module
+- [ ] Returns `Vec<u8>` (raw bytes, no UTF-8 conversion)
+- [ ] Add tests for reading binary files
+
+**Notes:**
+- Currently only `read_text_file()` exists which uses `fs::read_to_string()`
+- Binary needs `fs::read()` which returns `Vec<u8>`
+
+---
+
+### Task 7.3: Create Binary File Documents
+
+Update sync_ops to create documents for binary files.
+
+- [ ] Modify `create_file_document()` to handle both text and binary
+- [ ] Use `FileInfo.is_text` to choose the right content type
+- [ ] Create binary document with ByteVec content
+- [ ] Add tests for creating binary file documents
+
+**Notes:**
+- Remove the "binary files not yet supported" error
+- The function should work for any file type
+
+---
+
+### Task 7.4: Update Binary File Documents
+
+Support updating existing binary file documents.
+
+- [ ] Modify `update_file_document()` to handle binary content
+- [ ] Read binary content from disk when updating
+- [ ] Add tests for updating binary documents
+
+**Notes:**
+- Similar to text update but with raw bytes
+- Need to handle mixed scenarios (was text, now binary?)
+
+---
+
+### Task 7.5: Clone Binary Files
+
+Support cloning/pulling binary files from remote.
+
+- [ ] Update clone module to handle binary file documents
+- [ ] Write binary content to disk (not as UTF-8 string)
+- [ ] Ensure file permissions are set correctly
+- [ ] Add tests for cloning binary files
+
+**Notes:**
+- Currently clone writes with `fs::write()` which works for both text and binary
+- Need to extract bytes from ByteVec content
+
+---
+
+### Task 7.6: Wire Up Binary Support in Sync
+
+Remove binary file skipping and enable full binary support.
+
+- [ ] Remove "Skipping (binary)" logic from sync module
+- [ ] Update change detection to work with binary files
+- [ ] Ensure snapshot tracks binary files correctly
+- [ ] Test end-to-end binary file sync
+
+**Notes:**
+- The `FileInfo.is_text` field is still useful for choosing content type
+- But we no longer skip binary files
+
+---
+
+### Task 7.7: Interop Verification
+
+Verify binary files sync correctly with pushwork.
+
+- [ ] Create a directory with pushwork containing an image
+- [ ] Clone with thrustwork, verify image is byte-for-byte identical
+- [ ] Modify image with thrustwork, sync
+- [ ] Verify pushwork sees the updated image
 
 **Verification:**
 ```
-# Setup: Create with pushwork
-$ mkdir /tmp/pushwork-source && cd /tmp/pushwork-source
+# Setup: Create with pushwork including a binary file
+$ mkdir /tmp/pushwork-binary && cd /tmp/pushwork-binary
 $ pushwork init
-$ echo "Original content" > test.txt
+$ cp /path/to/test.png .
 $ pushwork sync
 
 # Clone with thrustwork
-$ mkdir /tmp/thrustwork-clone && cd /tmp/thrustwork-clone
+$ mkdir /tmp/thrustwork-binary && cd /tmp/thrustwork-binary
 $ thrustwork clone <url>
-$ cat test.txt  # "Original content"
+$ diff test.png /tmp/pushwork-binary/test.png  # Should be identical
 
-# Modify and sync
-$ echo "Modified by thrustwork" > test.txt
+# Modify and sync back
+$ convert test.png -resize 50% test.png  # or any image edit
 $ thrustwork sync
 
 # Verify with pushwork
-$ cd /tmp/pushwork-source
+$ cd /tmp/pushwork-binary
 $ pushwork sync
-$ cat test.txt  # Should show "Modified by thrustwork"
+$ diff test.png /tmp/thrustwork-binary/test.png  # Should match
 ```
 
 ---
 
-### Phase 6 Completion Checklist
+### Phase 7 Completion Checklist
 
-- [ ] Can load document content at specific heads
-- [ ] Can detect when local file differs from last sync
-- [ ] Can update existing file document with new content
-- [ ] Snapshot updated with new heads after push
-- [ ] Sync command handles modified files
-- [ ] Changes sync correctly with pushwork
+- [ ] Binary file documents can be created with ByteVec content
+- [ ] Binary files can be read from disk
+- [ ] Binary files can be pushed (create and update)
+- [ ] Binary files can be cloned/pulled
+- [ ] No more "binary not supported" skipping
+- [ ] Binary files sync correctly with pushwork
 
-**Phase 6 complete. Proceed to Phase 7 in IMPLEMENTATION_PLAN.md.**
+**Phase 7 complete when all items checked. Proceed to Phase 8.**
 
 ---
+

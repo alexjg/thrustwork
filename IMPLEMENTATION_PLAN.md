@@ -141,7 +141,27 @@ appears on another client.
 
 ---
 
-### Phase 7: Detect and Apply Remote Changes
+### Phase 7: Binary File Support
+
+**Goal**: Support syncing binary files (images, PDFs, etc.) in addition to text.
+
+**Deliverable**: Binary files can be pushed, pulled, and synced like text files.
+
+**Work**:
+- Update FileDocument to store binary content using Automerge `Bytes` type
+- Modify file reading to preserve binary content (no UTF-8 conversion)
+- Update file writing to handle binary content
+- Remove "binary files not yet supported" skipping throughout codebase
+- Ensure MIME type detection works for common binary formats
+- Update snapshot to track whether a file is text or binary
+
+**Verification**: Create a directory with a PNG image, sync with thrustwork.
+Clone elsewhere and verify the image is identical (byte-for-byte). Modify the
+image, sync, verify the change propagates.
+
+---
+
+### Phase 8: Detect and Apply Remote Changes
 
 **Goal**: Detect when a remote file has changed and pull the update.
 
@@ -159,7 +179,7 @@ on client B, verify it receives the change.
 
 ---
 
-### Phase 8: Handle Multiple Files
+### Phase 9: Handle Multiple Files
 
 **Goal**: Sync directories with multiple files.
 
@@ -178,7 +198,7 @@ elsewhere and verify all files appear.
 
 ---
 
-### Phase 9: Handle Subdirectories
+### Phase 10: Handle Subdirectories
 
 **Goal**: Support nested directory structures.
 
@@ -196,7 +216,7 @@ structure is preserved.
 
 ---
 
-### Phase 10: Handle File Deletion
+### Phase 11: Handle File Deletion
 
 **Goal**: Sync file deletions in both directions.
 
@@ -215,7 +235,7 @@ no longer contains it. Reverse: delete remotely, sync, verify local deletion.
 
 ---
 
-### Phase 11: Handle New Remote Files
+### Phase 12: Handle New Remote Files
 
 **Goal**: Discover and pull files added remotely that aren't in our snapshot.
 
@@ -232,7 +252,7 @@ syncs and receives the new file.
 
 ---
 
-### Phase 12: Move Detection
+### Phase 13: Move Detection
 
 **Goal**: Detect file moves/renames and preserve document identity.
 
@@ -251,7 +271,7 @@ is preserved (same document, new name).
 
 ---
 
-### Phase 13: Two-Phase Sync
+### Phase 14: Two-Phase Sync
 
 **Goal**: Implement the full two-phase sync algorithm for correctness.
 
@@ -270,7 +290,7 @@ up with merged result.
 
 ---
 
-### Phase 14: Remaining CLI Commands
+### Phase 15: Remaining CLI Commands
 
 **Goal**: Complete the CLI interface.
 
@@ -287,7 +307,7 @@ up with merged result.
 
 ---
 
-### Phase 15: Configuration
+### Phase 16: Configuration
 
 **Goal**: Support user configuration.
 
@@ -304,7 +324,7 @@ up with merged result.
 
 ---
 
-### Phase 16: Robustness
+### Phase 17: Robustness
 
 **Goal**: Handle edge cases and errors gracefully.
 
@@ -328,11 +348,11 @@ network issues.
 | Milestone | Phases | Capability |
 |-----------|--------|------------|
 | M1: Connected | 1-2 | Can create/read pushwork-compatible documents |
-| M2: Single file | 3-5 | Init, push one file, clone one file |
-| M3: Bidirectional | 6-7 | Detect and sync changes both directions |
-| M4: Full tree | 8-9 | Multiple files, nested directories |
-| M5: Complete sync | 10-13 | Deletions, new files, moves, two-phase |
-| M6: Production | 14-16 | Full CLI, configuration, robustness |
+| M2: Single file | 3-6 | Init, push one file, clone one file, detect changes |
+| M3: Binary + remote | 7-8 | Binary file support, pull remote changes |
+| M4: Full tree | 9-10 | Multiple files, nested directories |
+| M5: Complete sync | 11-14 | Deletions, new files, moves, two-phase |
+| M6: Production | 15-17 | Full CLI, configuration, robustness |
 
 ## Notes
 
