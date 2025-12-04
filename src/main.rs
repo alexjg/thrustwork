@@ -7,6 +7,7 @@ use tokio_tungstenite::connect_async;
 
 mod config;
 mod documents;
+mod files;
 mod init;
 mod snapshot;
 

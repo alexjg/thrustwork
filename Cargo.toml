@@ -7,6 +7,7 @@ edition = "2024"
 automerge = "0.7"
 autosurgeon = "0.10.0"
 clap = { version = "4.5.53", features = ["derive"] }
+mime_guess = "2.0.5"
 #samod = { version = "0.5", features = ["tokio", "tungstenite"] }
 samod = { path = "/home/alex/Projects/automerge/samod/samod", features = ["tokio", "tungstenite"] }
 serde = { version = "1.0.228", features = ["derive"] }

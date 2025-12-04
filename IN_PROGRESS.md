@@ -89,17 +89,20 @@ Create the snapshot types for tracking sync state.
 
 Add utilities for reading local files and detecting their type.
 
-- [ ] Add `mime_guess` crate dependency
-- [ ] Create function to read file content from disk
-- [ ] Create function to detect MIME type from filename/extension
-- [ ] Create function to extract file extension from path
-- [ ] Determine text vs binary based on MIME type
-- [ ] Add tests for common file types
+- [x] Add `mime_guess` crate dependency
+- [x] Create function to read file content from disk
+- [x] Create function to detect MIME type from filename/extension
+- [x] Create function to extract file extension from path
+- [x] Determine text vs binary based on MIME type
+- [x] Add tests for common file types
 
 **Notes:**
-- Text files: text/*, application/json, application/javascript, etc.
-- Binary files: everything else (images, executables, etc.)
-- For now, focus on text files only
+- Created `src/files.rs` with `FileInfo` struct and utility functions
+- `guess_mime_type()` uses mime_guess crate, defaults to `application/octet-stream`
+- `is_text_mime_type()` returns true for text/* and common text-based application/* types
+- `read_text_file()` reads file content as string
+- `get_file_permissions()` gets Unix mode (platform-aware, defaults to 644 on non-Unix)
+- 32 tests passing (11 new files tests)
 
 ---
 
