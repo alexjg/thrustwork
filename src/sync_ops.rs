@@ -7,8 +7,8 @@ use autosurgeon::{hydrate, reconcile};
 use samod::{AutomergeUrl, ConnectionId, DocHandle, Repo};
 use thiserror::Error;
 
-use crate::documents::{DirectoryDocument, DirectoryEntry, FileDocument};
-use crate::files::{get_file_permissions, read_text_file, FileInfo};
+use crate::documents::{DirectoryDocument, DirectoryEntry, FileContent, FileDocument};
+use crate::files::{get_file_permissions, FileInfo};
 use crate::snapshot::SnapshotFileEntry;
 
 /// Errors that can occur during sync operations
@@ -21,10 +21,6 @@ pub enum SyncError {
         #[source]
         source: std::io::Error,
     },
-
-    /// File is not a text file
-    #[error("File '{0}' is not a text file (binary files not yet supported)")]
-    NotTextFile(String),
 
     /// Failed to create document in repo
     #[error("Failed to create document: {0}")]
@@ -56,21 +52,14 @@ pub struct CreatedFileDocument {
 /// Create an Automerge file document from a local file
 ///
 /// This reads the file content, detects its type, and creates an Automerge
-/// document in the repo.
+/// document in the repo. Supports both text and binary files.
 pub async fn create_file_document(
     repo: &Repo,
     absolute_path: &Path,
     file_info: &FileInfo,
 ) -> Result<CreatedFileDocument, SyncError> {
-    // For Phase 4, only support text files
-    if !file_info.is_text {
-        return Err(SyncError::NotTextFile(
-            absolute_path.to_string_lossy().to_string(),
-        ));
-    }
-
-    // Read file content
-    let content = read_text_file(absolute_path).map_err(|e| SyncError::ReadFile {
+    // Read file content - binary read works for both text and binary
+    let bytes = std::fs::read(absolute_path).map_err(|e| SyncError::ReadFile {
         path: absolute_path.to_string_lossy().to_string(),
         source: e,
     })?;
@@ -85,14 +74,27 @@ pub async fn create_file_document(
         .unwrap_or("unknown")
         .to_string();
 
-    // Create FileDocument
-    let file_doc = FileDocument::new(
-        name.clone(),
-        file_info.extension.clone(),
-        file_info.mime_type.clone(),
-        &content,
-        permissions,
-    );
+    // Create FileDocument with appropriate content type
+    let file_doc = if file_info.is_text {
+        // For text files, convert to String
+        let content = String::from_utf8_lossy(&bytes).into_owned();
+        FileDocument::new(
+            name.clone(),
+            file_info.extension.clone(),
+            file_info.mime_type.clone(),
+            &content,
+            permissions,
+        )
+    } else {
+        // For binary files, use raw bytes
+        FileDocument::new_binary(
+            name.clone(),
+            file_info.extension.clone(),
+            file_info.mime_type.clone(),
+            bytes,
+            permissions,
+        )
+    };
 
     // Create Automerge document
     let mut doc = Automerge::new();
@@ -212,8 +214,8 @@ pub fn update_file_document(
         let mut file_doc: FileDocument =
             hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
 
-        // Update content
-        file_doc.content = new_content.to_string();
+        // Update content (keeping it as text for now)
+        file_doc.content = FileContent::text(new_content);
 
         // Update permissions if provided
         if let Some(perms) = new_permissions {
@@ -280,10 +282,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_file_document_not_text() {
+    async fn test_create_file_document_binary() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("image.png");
-        fs::write(&file_path, &[0x89, 0x50, 0x4E, 0x47]).unwrap(); // PNG header
+        let png_data = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG header
+        fs::write(&file_path, png_data).unwrap();
 
         let file_info = FileInfo::from_path(&file_path);
         assert!(!file_info.is_text);
@@ -291,7 +294,16 @@ mod tests {
         let repo = Repo::build_tokio().load().await;
 
         let result = create_file_document(&repo, &file_path, &file_info).await;
-        assert!(matches!(result, Err(SyncError::NotTextFile(_))));
+        assert!(result.is_ok());
+
+        let created = result.unwrap();
+        assert_eq!(created.name, "image.png");
+
+        // Verify the document contains binary content
+        let file_doc: FileDocument =
+            created.handle.with_document(|doc| hydrate(doc).unwrap());
+        assert!(file_doc.is_binary());
+        assert_eq!(file_doc.content_bytes(), png_data);
     }
 
     #[test]
@@ -413,7 +425,7 @@ mod tests {
         // Now update the document with new content
         created.handle.with_document(|doc| {
             let mut file_doc: FileDocument = hydrate(doc).unwrap();
-            file_doc.content = "Modified content".to_string();
+            file_doc.content = FileContent::text("Modified content");
             doc.transact::<_, _, automerge::AutomergeError>(|txn| {
                 reconcile(txn, &file_doc).unwrap();
                 Ok(())

@@ -108,10 +108,10 @@ Update a file document with new local content.
 
 Add a new document type for binary files using Automerge Bytes.
 
-- [ ] Add `BinaryFileDocument` struct using `autosurgeon::ByteVec` for content
-- [ ] Or modify `FileDocument` to use an enum for content (text vs binary)
-- [ ] Add constructor for binary files
-- [ ] Add tests for binary document serialization roundtrip
+- [x] Add `BinaryFileDocument` struct using `autosurgeon::ByteVec` for content
+- [x] Or modify `FileDocument` to use an enum for content (text vs binary)
+- [x] Add constructor for binary files
+- [x] Add tests for binary document serialization roundtrip
 
 **Notes:**
 - Pushwork uses the same schema but with `content` as Bytes instead of String
@@ -120,19 +120,16 @@ Add a new document type for binary files using Automerge Bytes.
 - Hydrate: inspect Automerge value type and construct appropriate variant
 - This keeps FileDocument as a single struct, avoids field duplication
 
+**Implementation:** Added `FileContent` enum with custom `Reconcile` and `Hydrate` implementations
+in `src/documents.rs`. The enum switches between String and Bytes based on the variant.
+`FileDocument` now uses `FileContent` for its content field.
+
 ---
 
 ### Task 7.2: Add Binary File Reading
 
-Implement reading binary files from disk.
-
-- [ ] Add `read_binary_file()` function to files module
-- [ ] Returns `Vec<u8>` (raw bytes, no UTF-8 conversion)
-- [ ] Add tests for reading binary files
-
-**Notes:**
-- Currently only `read_text_file()` exists which uses `fs::read_to_string()`
-- Binary needs `fs::read()` which returns `Vec<u8>`
+**SKIPPED** - This is just a trivial wrapper around `std::fs::read()`. We'll use
+`std::fs::read()` directly where needed.
 
 ---
 
@@ -140,14 +137,21 @@ Implement reading binary files from disk.
 
 Update sync_ops to create documents for binary files.
 
-- [ ] Modify `create_file_document()` to handle both text and binary
-- [ ] Use `FileInfo.is_text` to choose the right content type
-- [ ] Create binary document with ByteVec content
-- [ ] Add tests for creating binary file documents
+- [x] Modify `create_file_document()` to handle both text and binary
+- [x] Use `FileInfo.is_text` to choose the right content type
+- [x] Create binary document with ByteVec content
+- [x] Add tests for creating binary file documents
 
 **Notes:**
 - Remove the "binary files not yet supported" error
 - The function should work for any file type
+
+**Implementation:** Updated `create_file_document()` in `sync_ops.rs` to:
+- Read all files as bytes using `std::fs::read()`
+- Use `FileDocument::new()` for text files (converting bytes to String)
+- Use `FileDocument::new_binary()` for binary files (raw bytes)
+- Removed `SyncError::NotTextFile` variant - no longer needed
+- Updated test to verify binary document creation works correctly
 
 ---
 
