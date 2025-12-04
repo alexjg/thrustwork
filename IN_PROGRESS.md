@@ -31,3 +31,194 @@ The overall design we are working on is described in DESIGN.md and the separate 
 
 ---
 
+## Phase 4: Push a Single File
+
+**Goal**: Sync a single local file to the remote.
+
+**Deliverable**: After `init`, creating a file and running `thrustwork sync`
+pushes it to the remote.
+
+---
+
+### Task 4.1: Add sync Subcommand Skeleton
+
+Add the `sync` command to the CLI with basic structure.
+
+- [ ] Add `Sync` variant to `Commands` enum
+- [ ] Add basic handler that finds the `.pushwork` directory
+- [ ] Load the config to get the root directory URL
+- [ ] Connect to sync server and load the root directory document
+- [ ] Print basic status (e.g., "Syncing directory: <path>")
+
+**Notes:**
+- This is just the skeleton - actual sync logic comes later
+- Need to walk up from cwd to find `.pushwork` (like git finds `.git`)
+
+---
+
+### Task 4.2: Define Snapshot Structure
+
+Create the snapshot types for tracking sync state.
+
+- [ ] Create `snapshot` module
+- [ ] Define `Snapshot` struct with serde derives:
+  - `timestamp: u64`
+  - `root_path: PathBuf`
+  - `root_directory_url: Option<String>`
+  - `files: Vec<FileEntry>`
+  - `directories: Vec<DirectoryEntry>`
+- [ ] Define `FileEntry` struct (path, url, head, extension, mime_type)
+- [ ] Define `DirectoryEntry` struct (path, url, head)
+- [ ] Add load/save functions for `.pushwork/snapshot.json`
+- [ ] Add tests for serialization roundtrip
+
+**Notes:**
+- Match pushwork's snapshot format for compatibility
+- `head` is a Vec<String> of hex-encoded change hashes
+
+---
+
+### Task 4.3: Implement File Reading and MIME Detection
+
+Add utilities for reading local files and detecting their type.
+
+- [ ] Add `mime_guess` crate dependency
+- [ ] Create function to read file content from disk
+- [ ] Create function to detect MIME type from filename/extension
+- [ ] Create function to extract file extension from path
+- [ ] Determine text vs binary based on MIME type
+- [ ] Add tests for common file types
+
+**Notes:**
+- Text files: text/*, application/json, application/javascript, etc.
+- Binary files: everything else (images, executables, etc.)
+- For now, focus on text files only
+
+---
+
+### Task 4.4: Scan Directory for Untracked Files
+
+Implement scanning to find files that need to be pushed.
+
+- [ ] Create function to scan directory recursively
+- [ ] Filter out excluded patterns from config
+- [ ] Compare against empty snapshot (all files are new)
+- [ ] Return list of files to push with their paths
+
+**Notes:**
+- Use `walkdir` or `std::fs::read_dir` recursively
+- Respect `.pushwork/config.json` exclude patterns
+- For Phase 4, we only care about new files (not modifications)
+
+---
+
+### Task 4.5: Create File Document from Local File
+
+Implement creating an Automerge file document from a local file.
+
+- [ ] Read file content from disk
+- [ ] Get file permissions (Unix mode)
+- [ ] Detect MIME type and extension
+- [ ] Create `FileDocument` with the content
+- [ ] Reconcile to Automerge document
+- [ ] Create document in repo and get URL
+
+**Notes:**
+- Reuse `FileDocument` from `documents.rs`
+- For text files, content is the string content
+- Permissions should be read from filesystem metadata
+
+---
+
+### Task 4.6: Update Root Directory Document
+
+Add the new file entry to the root directory.
+
+- [ ] Load the root directory document from repo
+- [ ] Hydrate to `DirectoryDocument`
+- [ ] Add new `DirectoryEntry` for the file
+- [ ] Reconcile back to Automerge
+- [ ] Wait for sync to complete
+
+**Notes:**
+- The entry needs: name, type ("file"), url
+- Use `they_have_our_changes` to wait for sync
+
+---
+
+### Task 4.7: Save Snapshot After Sync
+
+Update the snapshot file with the new file entry.
+
+- [ ] Create or load existing snapshot
+- [ ] Add `FileEntry` for the new file (path, url, heads)
+- [ ] Update timestamp
+- [ ] Save snapshot to `.pushwork/snapshot.json`
+
+**Notes:**
+- Get document heads using `doc.get_heads()`
+- Heads are hex-encoded change hash strings
+
+---
+
+### Task 4.8: Wire Up Sync Command
+
+Connect all the pieces in the sync command handler.
+
+- [ ] Scan for untracked files
+- [ ] For each new file:
+  - Create file document
+  - Add to root directory
+- [ ] Wait for all syncs to complete
+- [ ] Save snapshot
+- [ ] Print summary of synced files
+
+**Notes:**
+- For Phase 4, only handle new files (not updates/deletes)
+- Print progress as files are synced
+
+---
+
+### Task 4.9: Interop Verification
+
+Verify the pushed file can be seen by pushwork.
+
+- [ ] Initialize a directory with `thrustwork init`
+- [ ] Create a text file (e.g., `hello.txt`)
+- [ ] Run `thrustwork sync`
+- [ ] Clone with pushwork in another directory
+- [ ] Verify the file appears with correct content
+
+**Verification:**
+```
+$ mkdir /tmp/test-push && cd /tmp/test-push
+$ thrustwork init
+$ echo "Hello from thrustwork!" > hello.txt
+$ thrustwork sync
+Syncing directory: /tmp/test-push
+  Pushing: hello.txt
+Done! 1 file synced.
+
+$ mkdir /tmp/test-pull && cd /tmp/test-pull
+$ pushwork clone <url>
+$ cat hello.txt
+Hello from thrustwork!
+```
+
+---
+
+### Phase 4 Completion Checklist
+
+- [ ] `sync` command implemented
+- [ ] Snapshot structure defined and can be saved/loaded
+- [ ] File reading and MIME detection working
+- [ ] Directory scanning finds untracked files
+- [ ] File documents created correctly
+- [ ] Root directory updated with new entries
+- [ ] Snapshot saved after sync
+- [ ] Pushwork can clone and see pushed files
+
+**Phase 4 complete. Proceed to Phase 5 in IMPLEMENTATION_PLAN.md.**
+
+---
+
