@@ -14,6 +14,10 @@ The overall design we are working on is described in DESIGN.md and the separate 
 **General Instructions**
 - Read DESIGN.md and IMPLEMENTATION_PLAN.md for context
 
+**Code Style**
+- Organise functions in modules with entry points at the top and helper/leaf functions
+  at the bottom. This makes it easy to understand the module by reading top-to-bottom.
+
 **Technical Decisions**
 - Using `autosurgeon` crate for mapping Rust structs to Automerge documents
   - Provides `Reconcile` (write) and `Hydrate` (read) derive macros
@@ -106,12 +110,12 @@ Update snapshot with new document heads after pushing changes.
 
 Integrate change detection into the sync command.
 
-- [ ] Load existing snapshot at start of sync
-- [ ] Run change detection (new files + modified files)
-- [ ] For new files: create documents (existing behavior)
-- [ ] For modified files: update documents (new behavior)
-- [ ] Wait for sync to complete
-- [ ] Update snapshot with all changes
+- [x] Load existing snapshot at start of sync
+- [x] Run change detection (new files + modified files)
+- [x] For new files: create documents (existing behavior)
+- [x] For modified files: update documents (new behavior)
+- [x] Wait for sync to complete
+- [x] Update snapshot with all changes
 
 **Notes:**
 - Sync command now handles both new and modified files

@@ -338,8 +338,11 @@ mod tests {
         let json = serde_json::to_string_pretty(&snapshot).unwrap();
         println!("Snapshot JSON:\n{}", json);
 
-        // Verify hex encoding in JSON
-        assert!(json.contains(HASH_A));
+        // Verify base58check encoding in JSON (not hex)
+        // The hash should be encoded as base58check, not hex
+        assert!(!json.contains(HASH_A), "JSON should NOT contain hex-encoded hash");
+        // Heads should be present as base58check strings
+        assert!(json.contains("head"), "JSON should contain head field");
 
         // Parse back
         let parsed: Snapshot = serde_json::from_str(&json).unwrap();
