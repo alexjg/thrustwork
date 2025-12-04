@@ -176,6 +176,64 @@ pub fn get_document_heads(handle: &DocHandle) -> Vec<ChangeHash> {
     handle.with_document(|doc| doc.get_heads())
 }
 
+/// Get the content of a file document at specific heads
+///
+/// This forks the document at the given heads and extracts the content,
+/// allowing comparison against the current local file content.
+pub fn get_file_content_at_heads(
+    handle: &DocHandle,
+    heads: &[ChangeHash],
+) -> Result<String, SyncError> {
+    handle.with_document(|doc| {
+        // Fork the document at the specified heads
+        let forked = doc
+            .fork_at(heads)
+            .map_err(|e| SyncError::Document(format!("Failed to fork at heads: {}", e)))?;
+
+        // Hydrate to get the FileDocument
+        let file_doc: FileDocument =
+            hydrate(&forked).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+
+        Ok(file_doc.content_string())
+    })
+}
+
+/// Update an existing file document with new content
+///
+/// This loads the document, updates the content field, and reconciles
+/// the changes back. Returns the new heads after the update.
+pub fn update_file_document(
+    handle: &DocHandle,
+    new_content: &str,
+    new_permissions: Option<i64>,
+) -> Result<Vec<ChangeHash>, SyncError> {
+    handle.with_document(|doc| {
+        // Hydrate to get current FileDocument
+        let mut file_doc: FileDocument =
+            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+
+        // Update content
+        file_doc.content = new_content.to_string();
+
+        // Update permissions if provided
+        if let Some(perms) = new_permissions {
+            file_doc.metadata.permissions = perms;
+        }
+
+        // Reconcile changes back
+        doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+            reconcile(txn, &file_doc).map_err(|e| {
+                automerge::AutomergeError::InvalidObjId(format!("reconcile failed: {}", e))
+            })?;
+            Ok(())
+        })
+        .map_err(|e| SyncError::Reconcile(format!("{:?}", e)))?;
+
+        // Return new heads
+        Ok(doc.get_heads())
+    })
+}
+
 /// Create a SnapshotFileEntry for a synced file
 ///
 /// This captures the current state of the file document for the snapshot.
@@ -329,5 +387,107 @@ mod tests {
 
         // A document with one transaction should have exactly one head
         assert_eq!(heads.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_content_at_heads() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        fs::write(&file_path, "Original content").unwrap();
+
+        let file_info = FileInfo::from_path(&file_path);
+        let repo = Repo::build_tokio().load().await;
+
+        // Create initial file document
+        let created = create_file_document(&repo, &file_path, &file_info)
+            .await
+            .unwrap();
+
+        // Get heads after creation
+        let initial_heads = get_document_heads(&created.handle);
+
+        // Verify we can read content at those heads
+        let content = get_file_content_at_heads(&created.handle, &initial_heads).unwrap();
+        assert_eq!(content, "Original content");
+
+        // Now update the document with new content
+        created.handle.with_document(|doc| {
+            let mut file_doc: FileDocument = hydrate(doc).unwrap();
+            file_doc.content = "Modified content".to_string();
+            doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+                reconcile(txn, &file_doc).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+
+        // Current content should be modified
+        let current: FileDocument =
+            created.handle.with_document(|doc| hydrate(doc).unwrap());
+        assert_eq!(current.content_string(), "Modified content");
+
+        // But content at original heads should still be original
+        let old_content = get_file_content_at_heads(&created.handle, &initial_heads).unwrap();
+        assert_eq!(old_content, "Original content");
+    }
+
+    #[tokio::test]
+    async fn test_update_file_document() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        fs::write(&file_path, "Original content").unwrap();
+
+        let file_info = FileInfo::from_path(&file_path);
+        let repo = Repo::build_tokio().load().await;
+
+        // Create initial file document
+        let created = create_file_document(&repo, &file_path, &file_info)
+            .await
+            .unwrap();
+
+        let initial_heads = get_document_heads(&created.handle);
+
+        // Update the document
+        let new_heads =
+            update_file_document(&created.handle, "Updated content", Some(0o755)).unwrap();
+
+        // Heads should have changed
+        assert_ne!(initial_heads, new_heads);
+
+        // Content should be updated
+        let file_doc: FileDocument =
+            created.handle.with_document(|doc| hydrate(doc).unwrap());
+        assert_eq!(file_doc.content_string(), "Updated content");
+        assert_eq!(file_doc.metadata.permissions, 0o755);
+    }
+
+    #[tokio::test]
+    async fn test_update_file_document_content_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        fs::write(&file_path, "Original content").unwrap();
+
+        let file_info = FileInfo::from_path(&file_path);
+        let repo = Repo::build_tokio().load().await;
+
+        // Create initial file document
+        let created = create_file_document(&repo, &file_path, &file_info)
+            .await
+            .unwrap();
+
+        let original_perms: i64 =
+            created.handle.with_document(|doc| {
+                let f: FileDocument = hydrate(doc).unwrap();
+                f.metadata.permissions
+            });
+
+        // Update content only (no permissions change)
+        update_file_document(&created.handle, "New content", None).unwrap();
+
+        // Permissions should be unchanged
+        let file_doc: FileDocument =
+            created.handle.with_document(|doc| hydrate(doc).unwrap());
+        assert_eq!(file_doc.content_string(), "New content");
+        assert_eq!(file_doc.metadata.permissions, original_perms);
     }
 }

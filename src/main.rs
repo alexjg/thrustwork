@@ -5,6 +5,7 @@ use samod::{storage::TokioFilesystemStorage, AutomergeUrl, ConnDirection, DocHan
 use std::str::FromStr;
 use tokio_tungstenite::connect_async;
 
+mod changes;
 mod clone;
 mod config;
 mod documents;

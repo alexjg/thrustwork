@@ -44,10 +44,10 @@ The overall design we are working on is described in DESIGN.md and the separate 
 
 Implement reading the file content as it was at the last sync.
 
-- [ ] Add function to load a file document at specific heads
-- [ ] Use `Automerge::fork_at()` or similar to get document state at heads
-- [ ] Extract content from the historical document state
-- [ ] Add tests for loading at heads
+- [x] Add function to load a file document at specific heads
+- [x] Use `Automerge::fork_at()` or similar to get document state at heads
+- [x] Extract content from the historical document state
+- [x] Add tests for loading at heads
 
 **Notes:**
 - Need to compare current local file against what was synced last
@@ -60,11 +60,11 @@ Implement reading the file content as it was at the last sync.
 
 Compare local file content against snapshot state.
 
-- [ ] For each file in snapshot, check if it still exists on disk
-- [ ] Read current file content from disk
-- [ ] Load document content at snapshot heads
-- [ ] Compare: if different, mark as LOCAL_ONLY change
-- [ ] Add `modified_files` detection to scanner
+- [x] For each file in snapshot, check if it still exists on disk
+- [x] Read current file content from disk
+- [x] Load document content at snapshot heads
+- [x] Compare: if different, mark as LOCAL_ONLY change
+- [x] Add `modified_files` detection to scanner
 
 **Notes:**
 - A file is modified if disk content differs from document-at-snapshot-heads
@@ -76,11 +76,11 @@ Compare local file content against snapshot state.
 
 Update a file document with new local content.
 
-- [ ] Load the existing file document by URL from snapshot
-- [ ] Update the `content` field with new file content
-- [ ] Update `metadata.permissions` if changed
-- [ ] Reconcile changes back to document
-- [ ] Add `update_file_document()` function to sync_ops
+- [x] Load the existing file document by URL from snapshot
+- [x] Update the `content` field with new file content
+- [x] Update `metadata.permissions` if changed
+- [x] Reconcile changes back to document
+- [x] Add `update_file_document()` function to sync_ops
 
 **Notes:**
 - Don't create a new document - update the existing one
