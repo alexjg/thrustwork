@@ -126,27 +126,57 @@ architecture:
 
 ---
 
-### Phase 11: Handle File Deletion
+### Phase 11: Handle File Deletion ✓
 
 **Goal**: Sync file deletions in both directions.
 
 **Deliverable**: Delete a file locally, sync removes it remotely (and vice
 versa).
 
-**Work**:
-- In `process_sync_directory`, detect files in snapshot but not on local disk
-  (local deletion) - remove from remote directory document
-- In `process_sync_directory`, detect files in snapshot but not in remote
-  directory (remote deletion) - delete local file
-- Remove deleted files from snapshot
-- Handle directory deletion (empty directories, recursive deletion)
-
-**Verification**: Sync a file, delete it locally, sync. Verify remote directory
-no longer contains it. Reverse: delete remotely, sync, verify local deletion.
+**Status**: Complete
 
 ---
 
-### ~~Phase 12: Handle New Remote Files~~ (Merged into Phase 10)
+### Phase 12: Integration Test Suite
+
+**Goal**: Build automated integration tests to verify sync behavior without
+manual testing. This is essential before further feature work.
+
+**Deliverable**: A test suite that:
+- Compiles the thrustwork binary
+- Runs a local automerge-repo sync server
+- Executes test scenarios against the local server
+- Verifies correct behavior programmatically
+
+**Work**:
+- Set up test infrastructure:
+  - Build binary as part of test setup
+  - Start/stop local sync server (automerge-repo-sync-server or equivalent)
+  - Create temporary directories for test clients
+  - Helper functions for common operations (init, clone, sync, file operations)
+- Implement test scenarios:
+  - Basic: init, push file, clone to second client, verify content
+  - Bidirectional: push from A, pull to B, push from B, pull to A
+  - Modifications: edit file on A, sync, verify B gets update
+  - Conflicts: concurrent edits, verify CRDT merge
+  - Deletions: delete locally → syncs remotely, delete remotely → syncs locally
+  - Directories: nested directories, directory deletion
+  - Binary files: push/pull binary content
+- Consider using Rust's built-in test framework with `#[test]` or a dedicated
+  integration test binary
+
+**Technical Notes**:
+- The sync server can be `automerge-repo-sync-server` (npm package) or a Rust
+  equivalent if available
+- Tests should be isolated (each test gets fresh directories and server state)
+- Tests should clean up after themselves
+- Consider parallel test execution with isolated server ports
+
+**Verification**: `cargo test` runs all integration tests successfully.
+
+---
+
+### ~~Phase 12 (old): Handle New Remote Files~~ (Merged into Phase 10)
 
 **Status**: Complete - handled by `FetchNewFile` task in the parallel sync
 architecture. When `SyncDirectory` finds a remote file not in our snapshot,
@@ -253,9 +283,10 @@ network issues.
 | M1: Connected | 1-2 | Can create/read pushwork-compatible documents |
 | M2: Single file | 3-6 | Init, push one file, clone one file, detect changes |
 | M3: Binary + remote | 7-8 | Binary file support, pull remote changes |
-| M4: Full tree | 9-10 | Multiple files, nested directories, new remote files |
-| M5: Complete sync | 11, 13 | Deletions, moves |
-| M6: Production | 15-17 | Full CLI, configuration, robustness |
+| M4: Full tree | 9-11 | Multiple files, nested directories, deletions |
+| M5: Test infrastructure | 12 | Automated integration tests |
+| M6: Complete sync | 13 | Move detection |
+| M7: Production | 15-17 | Full CLI, configuration, robustness |
 
 ## Architecture Notes
 

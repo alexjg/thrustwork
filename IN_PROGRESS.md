@@ -195,7 +195,115 @@ Test deletion flows end-to-end.
 - [x] Conflict case handled (delete vs modify - remote modification wins, file restored)
 - [x] All verification tests pass
 
-**Phase 11 complete. Proceed to Phase 13 (Move Detection).**
+**Phase 11 complete. Proceed to Phase 12 (Integration Test Suite).**
+
+---
+
+## Phase 12: Integration Test Suite
+
+**Goal**: Build automated integration tests to replace manual testing.
+
+**Deliverable**: `cargo test` runs integration tests that verify sync behavior.
+
+**Architecture Context**:
+We need a test harness that:
+1. Builds the thrustwork binary
+2. Starts a local sync server
+3. Creates isolated test directories
+4. Runs thrustwork commands and verifies results
+5. Cleans up after each test
+
+---
+
+### Task 12.1: Research Sync Server Options
+
+Determine how to run a local sync server for testing.
+
+- [ ] Check if automerge-repo-sync-server can run locally (npm package)
+- [ ] Check if there's a Rust-native sync server we can embed
+- [ ] Determine server startup/shutdown approach
+- [ ] Document the chosen approach
+
+---
+
+### Task 12.2: Test Infrastructure Setup
+
+Create the test harness framework.
+
+- [ ] Create `tests/integration/` directory structure
+- [ ] Implement test fixture that:
+  - Builds the binary (or uses pre-built)
+  - Starts sync server on a random port
+  - Creates temp directories for test clients
+  - Provides helper methods for running thrustwork commands
+  - Cleans up on drop
+- [ ] Implement basic assertion helpers
+
+---
+
+### Task 12.3: Basic Sync Tests
+
+Implement core sync scenario tests.
+
+- [ ] Test: init creates .pushwork directory and config
+- [ ] Test: push single file, clone to second client, verify content matches
+- [ ] Test: push multiple files, clone, verify all present
+- [ ] Test: push nested directory structure, clone, verify structure
+
+---
+
+### Task 12.4: Modification Tests
+
+Test file modification scenarios.
+
+- [ ] Test: modify file on client A, sync both, verify B has changes
+- [ ] Test: modify file on client B, sync both, verify A has changes
+- [ ] Test: concurrent modifications, verify CRDT merge
+
+---
+
+### Task 12.5: Deletion Tests
+
+Test deletion scenarios (replaces manual testing from Phase 11).
+
+- [ ] Test: delete file locally, sync, verify removed from clone
+- [ ] Test: delete file remotely (from B), sync A, verify deleted locally
+- [ ] Test: delete directory locally, sync, verify removed from clone
+- [ ] Test: delete directory remotely, sync, verify deleted locally
+
+---
+
+### Task 12.6: Binary File Tests
+
+Test binary file handling.
+
+- [ ] Test: push binary file, clone, verify content matches
+- [ ] Test: modify binary file, sync, verify update
+
+---
+
+### Task 12.7: Edge Case Tests
+
+Test error handling and edge cases.
+
+- [ ] Test: sync empty directory
+- [ ] Test: file with special characters in name
+- [ ] Test: large file (if practical)
+- [ ] Test: sync with no changes (idempotent)
+
+---
+
+### Phase 12 Completion Checklist
+
+- [ ] Sync server runs locally for tests
+- [ ] Test harness creates isolated test environments
+- [ ] Basic sync tests pass
+- [ ] Modification tests pass
+- [ ] Deletion tests pass
+- [ ] Binary file tests pass
+- [ ] `cargo test` runs all tests successfully
+
+**Phase 12 complete when all tests pass reliably.**
 
 ---
 
