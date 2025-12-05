@@ -36,214 +36,142 @@ The overall design we are working on is described in DESIGN.md and the separate 
 
 ---
 
-## Phase 10: Handle Subdirectories (Parallel Sync Architecture)
+## Phase 11: Handle File Deletion
 
-**Goal**: Support nested directory structures with efficient parallel syncing.
+**Goal**: Sync file deletions in both directions.
 
-**Deliverable**: Sync works with files in subdirectories, processing directories
-and files in parallel as they become available.
+**Deliverable**: Delete a file locally, sync removes it remotely (and vice versa).
 
-**Architecture Overview**:
-Instead of gathering all changes upfront and then processing them, we use a
-streaming/parallel approach with a work queue (`FuturesUnordered`). This allows:
-- Parallel fetching and syncing of documents
-- Incremental discovery of nested directories
-- Efficient handling of deep hierarchies
-- Natural handling of new remote directories
+**Architecture Context**:
+The parallel sync architecture in `process_sync_directory` already compares:
+- Local filesystem entries
+- Remote directory document entries
+- Snapshot entries
 
-```
-SyncTask enum:
-- SyncDirectory { path, handle }     // Compare local vs remote, spawn child tasks
-- SyncFile { path, handle, entry }   // Compare content, push/pull/merge
-- FetchDirectory { path, url }       // Fetch new remote directory
-- FetchFile { path, url }            // Fetch new remote file
-- CreateDirectory { path, entries }  // Create new local directory doc
-```
+Deletion detection fits naturally: files in snapshot but missing from local or remote
+indicate deletion. The key challenge is distinguishing "deleted" from "not yet synced".
 
 ---
 
-### Task 10.1: Define SyncTask Enum and Result Types
+### Task 11.1: Detect Local File Deletion
 
-Create the core types for the parallel sync system.
+Extend `process_sync_directory` to detect files that exist in snapshot but not on disk.
 
-- [x] Define `SyncTask` enum with variants for different sync operations
-- [x] Define `SyncResult` to report what happened (for summary)
-- [x] Define `SyncContext` struct to hold shared state (repo, conn_id, snapshot, root path)
+- [ ] In `process_sync_directory`, after gathering local/remote/snapshot sets:
+  - Find files in snapshot that are NOT in local filesystem
+  - These are candidates for local deletion
+- [ ] For each locally-deleted file:
+  - If file also exists in remote → it was deleted locally, needs remote removal
+  - If file doesn't exist in remote → already deleted remotely, just clean snapshot
+- [ ] Add `SyncResult::Deleted { path: String }` variant for reporting
 
-**Done:** Created `src/sync_tasks.rs` with SyncTask, SyncResult, SyncContext, and SyncSummary types.
-
-**Notes:**
-```rust
-enum SyncTask {
-    /// Sync a directory: load doc, compare entries, spawn child tasks
-    SyncDirectory {
-        relative_path: PathBuf,  // "" for root
-        url: AutomergeUrl,
-    },
-    /// Sync a tracked file: compare local/remote, push/pull/merge
-    SyncFile {
-        relative_path: PathBuf,
-        url: AutomergeUrl,
-        snapshot_heads: Vec<ChangeHash>,
-    },
-    /// Fetch a new remote file (not in snapshot)
-    FetchNewFile {
-        relative_path: PathBuf,
-        url: AutomergeUrl,
-    },
-    /// Push a new local file (not in remote)
-    PushNewFile {
-        relative_path: PathBuf,
-        absolute_path: PathBuf,
-    },
-    /// Push a new local directory
-    PushNewDirectory {
-        relative_path: PathBuf,
-        absolute_path: PathBuf,
-    },
-}
-
-enum SyncResult {
-    Pushed { path: String },
-    Pulled { path: String },
-    Merged { path: String },
-    Created { path: String },
-    NoChange,
-    Error { path: String, message: String },
-}
-```
+**Notes**: Be careful not to treat "new remote file" as "locally deleted". A file
+in remote but not in snapshot is new, not deleted.
 
 ---
 
-### Task 10.2: Create Directory Document Function
+### Task 11.2: Remove Entry from Remote Directory
 
-Add ability to create directory documents (for new local subdirectories).
+Implement removing a file entry from a directory document.
 
-- [x] Add `create_directory_document()` to sync_ops.rs
-- [x] Takes directory name, returns handle and URL
-- [x] Creates empty directory doc with proper schema
-
-**Done:** Added `create_directory_document()` and `add_folder_to_directory()` to sync_ops.rs with tests.
-
----
-
-### Task 10.3: Implement Process Single Task
-
-Create function to process one SyncTask, returning results and new tasks.
-
-- [x] `process_task(task, context) -> (Vec<SyncResult>, Vec<SyncTask>)`
-- [x] Handle `SyncDirectory`: load doc, compare with local filesystem and snapshot
-- [x] Handle `SyncFile`: existing logic for push/pull/merge
-- [x] Handle `FetchNewFile`: pull file not in snapshot
-- [x] Handle `PushNewFile`: create doc, push to server
-- [x] Handle `PushNewDirectory`: create dir doc, push, return tasks for contents
-
-**Done:** Implemented all task processing functions in sync_tasks.rs.
+- [ ] Add `remove_file_from_directory(handle, filename)` to sync_ops.rs
+- [ ] Remove the entry from the directory's `files` map
+- [ ] Wait for sync confirmation (`they_have_our_changes`)
+- [ ] Add test for this function
 
 ---
 
-### Task 10.4: Implement Directory Sync Logic
+### Task 11.3: Handle Local File Deletion in Sync
 
-The core logic for `SyncDirectory` task - comparing local and remote state.
+Wire up local deletion detection to actually remove from remote.
 
-- [x] Load directory document, wait for sync (`we_have_their_changes`)
-- [x] List local filesystem entries in that directory
-- [x] Compare remote entries (from doc) vs local entries vs snapshot
-- [x] Spawn appropriate tasks:
-  - Remote-only file → `FetchNewFile`
-  - Local-only file → `PushNewFile`
-  - Both exist → `SyncFile`
-  - Remote-only dir → `SyncDirectory` (will fetch)
-  - Local-only dir → `PushNewDirectory`
-  - Both exist dir → `SyncDirectory`
+- [ ] When local deletion detected, call `remove_file_from_directory`
+- [ ] Remove the file from snapshot
+- [ ] Report `SyncResult::Deleted`
+- [ ] Handle the case where remote file was also modified (conflict - remote wins?)
 
-**Done:** Implemented `process_sync_directory` with full comparison logic.
+**Decision (from pushwork)**: Remote modification wins - restore file locally with remote content.
+Rationale: In CRDT systems, modifications win over deletions to prevent data loss.
+If someone edited the file, they want it to exist.
 
 ---
 
-### Task 10.5: Implement Parallel Task Runner
+### Task 11.4: Detect Remote File Deletion
 
-Create the main loop that processes tasks in parallel.
+Extend `process_sync_directory` to detect files deleted on remote.
 
-- [x] Use `FuturesUnordered` to run tasks concurrently
-- [x] Start with `SyncDirectory` for root
-- [x] As tasks complete, add new spawned tasks to the queue
-- [x] Collect all results for summary
-- [x] Continue until queue is empty
-
-**Done:** Implemented `run_sync()` using `FuturesUnordered` pattern.
+- [ ] Find files in snapshot that are NOT in remote directory document
+- [ ] These were deleted remotely
+- [ ] If file exists locally → delete it
+- [ ] If file doesn't exist locally → just clean snapshot (already deleted both sides)
 
 ---
 
-### Task 10.6: Update Snapshot Incrementally
+### Task 11.5: Delete Local File
 
-Modify snapshot to be updated as tasks complete, not at the end.
+Implement deleting a local file when remote deletion is detected.
 
-- [x] Add methods to update snapshot entries during sync
-- [x] Track both file and directory entries in snapshot
-- [x] Ensure snapshot is saved even if sync is interrupted
-- [x] Handle concurrent updates safely (or use single-threaded update)
-
-**Done:** Snapshot is wrapped in `Arc<Mutex<>>` and updated incrementally in each task processor.
+- [ ] Delete the file from local filesystem
+- [ ] Remove from snapshot
+- [ ] Report `SyncResult::DeletedLocally { path }` or similar
+- [ ] Handle errors gracefully (file already gone, permission denied)
 
 ---
 
-### Task 10.7: Refactor Sync Command to Use New Architecture
+### Task 11.6: Handle Directory Deletion
 
-Replace existing sync logic with the parallel task-based approach.
+Extend deletion handling to directories.
 
-- [x] Remove old `detect_modified_files`, `detect_remote_changes` calls
-- [x] Create `SyncContext` with repo, conn_id, snapshot, config
-- [x] Call `run_sync()` to process everything
-- [x] Update snapshot with results
-- [x] Print summary from collected results
+- [ ] Detect directory in snapshot but not locally → local deletion
+- [ ] Detect directory in snapshot but not in remote → remote deletion
+- [ ] For local deletion of directory:
+  - Remove folder entry from parent directory document
+  - The directory document itself can remain (orphaned but harmless)
+- [ ] For remote deletion of directory:
+  - Delete local directory (must be empty or recursive delete?)
+  - Remove from snapshot
+- [ ] Add `remove_folder_from_directory(handle, foldername)` to sync_ops.rs
 
-**Done:** sync.rs now uses the new task-based architecture.
-
----
-
-### Task 10.8: Update Clone to Use Task Architecture
-
-Refactor clone to use the same parallel approach.
-
-- [x] Clone becomes: connect, then `SyncDirectory` on root (fetch-only mode)
-- [x] Or: keep clone simple, just recursive fetch without comparison
-- [x] Ensure clone creates local directories as needed
-
-**Done:** clone.rs uses `run_clone()` with parallel directory fetching.
+**Decision (from pushwork)**: Yes, recursively delete non-empty directories.
+Pushwork uses `fs.rm(path, { recursive: true })` - no empty-only requirement.
+We'll use `std::fs::remove_dir_all()` in Rust.
 
 ---
 
-### Task 10.9: Verification Test
+### Task 11.7: Update Snapshot Cleanup
 
-Test the full subdirectory flow with parallel sync.
+Ensure snapshot stays consistent after deletions.
 
-- [x] Create nested directory structure, init, sync
-- [x] Clone and verify structure is preserved
-- [x] Add file in subdirectory on client A, sync, pull on client B
-- [x] Add new subdirectory on client A, sync, pull on client B
-- [x] Verify deep nesting works (3+ levels)
-
-**Done:** All verification tests passed:
-- Created `src/utils/helpers/helper.rs` (3 levels deep) ✓
-- Cloned and verified content ✓
-- Added `src/models/user.rs`, synced, and pulled on client B ✓
+- [ ] Remove deleted files from snapshot immediately after deletion confirmed
+- [ ] Remove deleted directories from snapshot
+- [ ] Handle nested deletions (directory deleted → children implicitly gone)
+- [ ] Verify snapshot is saved even if sync is interrupted mid-deletion
 
 ---
 
-### Phase 10 Completion Checklist
+### Task 11.8: Verification Tests
 
-- [x] SyncTask enum and result types defined
-- [x] Directory document creation working
-- [x] Single task processing implemented
-- [x] Directory sync logic compares local/remote/snapshot
-- [x] Parallel task runner with FuturesUnordered
-- [x] Snapshot updated incrementally
-- [x] Sync command refactored to new architecture
-- [x] Clone updated (or verified working)
-- [x] Nested directory structure verified end-to-end
+Test deletion flows end-to-end.
 
-**Phase 10 complete. Proceed to Phase 11.**
+- [ ] Local file deletion: sync file, delete locally, sync, verify remote removal
+- [ ] Remote file deletion: sync file, delete from another client, sync, verify local removal
+- [ ] Local directory deletion: sync directory with files, delete locally, sync
+- [ ] Remote directory deletion: sync directory, delete from another client, sync
+- [ ] Edge case: delete file that was never synced (should just disappear)
+- [ ] Edge case: delete file that's being modified remotely (conflict handling)
+
+---
+
+### Phase 11 Completion Checklist
+
+- [ ] Local file deletion detected and synced
+- [ ] Remote file deletion detected and applied
+- [ ] Directory deletion works in both directions
+- [ ] Snapshot updated correctly after deletions
+- [ ] Conflict case handled (delete vs modify)
+- [ ] All verification tests pass
+
+**Phase 11 complete. Proceed to Phase 13 (Move Detection).**
 
 ---
 
