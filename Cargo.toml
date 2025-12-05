@@ -5,7 +5,8 @@ edition = "2024"
 
 [dependencies]
 automerge = "0.7"
-autosurgeon = "0.10.0"
+#autosurgeon = "0.10.0"
+autosurgeon = { path = "/home/alex/Projects/automerge/autosurgeon/autosurgeon" }
 bs58 = { version = "0.5.1", features = ["check"] }
 clap = { version = "4.5.53", features = ["derive"] }
 futures = "0.3.31"

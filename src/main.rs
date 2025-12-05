@@ -10,6 +10,7 @@ mod config;
 mod documents;
 mod files;
 mod init;
+mod move_detector;
 mod scanner;
 mod snapshot;
 mod sync;

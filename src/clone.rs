@@ -59,7 +59,7 @@ pub(crate) async fn execute_clone(
     // Create empty snapshot
     let snapshot = Snapshot::new(cwd.clone(), Some(root_url.clone()));
 
-    // Create sync context
+    // Create sync context (move_threshold not relevant for clone, but required)
     let ctx = SyncContext::new(
         repo.clone(),
         conn_id,
@@ -67,6 +67,7 @@ pub(crate) async fn execute_clone(
         root_url.clone(),
         config.exclude_patterns.clone(),
         snapshot,
+        config.sync.move_detection_threshold,
     );
 
     println!("Cloning from: {}", url);

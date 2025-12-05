@@ -6,7 +6,6 @@
 mod harness;
 
 use harness::TestHarness;
-use std::time::Duration;
 
 /// Basic test: init creates .pushwork directory
 #[tokio::test]
@@ -292,4 +291,142 @@ async fn test_sync_empty_directory() {
         .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .collect();
     assert!(entries.is_empty());
+}
+
+/// Test: rename file locally, sync, verify document URL preserved
+#[tokio::test]
+async fn test_rename_file_preserves_document_url() {
+    let harness = TestHarness::new().await;
+
+    // Setup: A creates and syncs a file
+    let client_a = harness.create_client("client-a").await;
+    client_a.init().await.unwrap();
+    client_a.write_file("original.txt", "This is the original content that should be preserved").await;
+    client_a.sync().await.unwrap();
+
+    // Get the document URL before rename
+    let url_before = client_a.get_file_url("original.txt").await
+        .expect("should have URL in snapshot");
+
+    // Rename the file locally
+    client_a.rename_file("original.txt", "renamed.txt").await;
+    client_a.sync().await.unwrap();
+
+    // Verify: old file gone, new file exists
+    assert!(!client_a.file_exists("original.txt").await);
+    assert!(client_a.file_exists("renamed.txt").await);
+
+    // Get the document URL after rename - should be the same (document identity preserved)
+    let url_after = client_a.get_file_url("renamed.txt").await
+        .expect("should have URL in snapshot");
+    assert_eq!(url_before, url_after, "Document URL should be preserved after rename");
+
+    // Verify content is unchanged
+    assert_eq!(
+        client_a.read_file("renamed.txt").await,
+        "This is the original content that should be preserved"
+    );
+}
+
+/// Test: rename file on fresh sync (no other clients involved)
+#[tokio::test]
+async fn test_rename_file_fresh_sync() {
+    let harness = TestHarness::new().await;
+
+    // Client renames file between syncs
+    let client_a = harness.create_client("client-a").await;
+    client_a.init().await.unwrap();
+    client_a.write_file("original.txt", "Content to be renamed").await;
+    client_a.sync().await.unwrap();
+
+    // Rename locally
+    client_a.rename_file("original.txt", "newname.txt").await;
+
+    // Sync - should detect as move
+    client_a.sync().await.unwrap();
+
+    // Verify file exists with new name
+    assert!(!client_a.file_exists("original.txt").await);
+    assert!(client_a.file_exists("newname.txt").await);
+    assert_eq!(client_a.read_file("newname.txt").await, "Content to be renamed");
+}
+
+/// Test: rename file, sync to other client, verify other client sees rename
+#[tokio::test]
+async fn test_rename_syncs_to_other_client() {
+    let harness = TestHarness::new().await;
+
+    // Setup: A creates file, B clones
+    let client_a = harness.create_client("client-a").await;
+    client_a.init().await.unwrap();
+    client_a.write_file("original.txt", "Content to be renamed").await;
+    client_a.sync().await.unwrap();
+
+    let root_url = client_a.root_url().await.unwrap();
+    let client_b = harness.create_client("client-b").await;
+    client_b.clone(&root_url).await.unwrap();
+
+    // Verify B has the original file
+    assert!(client_b.file_exists("original.txt").await);
+
+    // A renames the file
+    client_a.rename_file("original.txt", "newname.txt").await;
+    client_a.sync().await.unwrap();
+
+    // B syncs and should see the renamed file
+    client_b.sync().await.unwrap();
+
+    assert!(!client_b.file_exists("original.txt").await);
+    assert!(client_b.file_exists("newname.txt").await);
+    assert_eq!(client_b.read_file("newname.txt").await, "Content to be renamed");
+}
+
+/// Test: rename with content modification - if similar enough, still detected as move
+#[tokio::test]
+async fn test_rename_with_small_content_change() {
+    let harness = TestHarness::new().await;
+
+    let client_a = harness.create_client("client-a").await;
+    client_a.init().await.unwrap();
+    client_a.write_file("original.txt", "This is a long piece of content that should be mostly preserved even after a small edit").await;
+    client_a.sync().await.unwrap();
+
+    let url_before = client_a.get_file_url("original.txt").await
+        .expect("should have URL");
+
+    // Delete old file and create new file with slightly modified content
+    client_a.delete_file("original.txt").await;
+    client_a.write_file("renamed.txt", "This is a long piece of content that should be mostly preserved even after a small edit!").await;
+    client_a.sync().await.unwrap();
+
+    let url_after = client_a.get_file_url("renamed.txt").await
+        .expect("should have URL");
+
+    // Should be detected as a move (>70% similar)
+    assert_eq!(url_before, url_after, "Should detect as move due to high similarity");
+}
+
+/// Test: different content should NOT be detected as move
+#[tokio::test]
+async fn test_different_content_not_detected_as_move() {
+    let harness = TestHarness::new().await;
+
+    let client_a = harness.create_client("client-a").await;
+    client_a.init().await.unwrap();
+    client_a.write_file("file1.txt", "AAAAAAAAAAAAAAAAAAAA").await;
+    client_a.sync().await.unwrap();
+
+    let url_before = client_a.get_file_url("file1.txt").await
+        .expect("should have URL");
+
+    // Delete old file and create completely different new file
+    client_a.delete_file("file1.txt").await;
+    client_a.write_file("file2.txt", "BBBBBBBBBBBBBBBBBBBB").await;
+    client_a.sync().await.unwrap();
+
+    let url_after = client_a.get_file_url("file2.txt").await
+        .expect("should have URL");
+
+    // Should NOT be detected as a move - URLs should be different
+    assert_ne!(url_before, url_after, "Completely different content should not be detected as move");
 }

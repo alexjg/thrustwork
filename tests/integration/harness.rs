@@ -249,6 +249,59 @@ impl TestClient {
         std::fs::remove_dir_all(&path).expect("failed to delete directory");
     }
 
+    /// Rename/move a file
+    pub async fn rename_file(&self, old_path: &str, new_path: &str) {
+        let old = self.path.join(old_path);
+        let new = self.path.join(new_path);
+        if let Some(parent) = new.parent() {
+            std::fs::create_dir_all(parent).expect("failed to create parent dirs");
+        }
+        std::fs::rename(&old, &new).expect("failed to rename file");
+    }
+
+    /// Get the file URL from the snapshot (for verifying document identity)
+    /// The snapshot files is serialized as array of [key, entry] pairs
+    pub async fn get_file_url(&self, relative_path: &str) -> Option<String> {
+        let snapshot_path = self.path.join(".pushwork/snapshot.json");
+        let content = std::fs::read_to_string(&snapshot_path).ok()?;
+
+        // Debug: print the snapshot content if TEST_VERBOSE is set
+        if std::env::var("TEST_VERBOSE").is_ok() {
+            eprintln!("Snapshot content for {}:\n{}", relative_path, content);
+        }
+
+        let snapshot: serde_json::Value = serde_json::from_str(&content).ok()?;
+        // Files is an array of [key, entry] pairs (HashMap serialized as entries)
+        let files = snapshot.get("files")?.as_array()?;
+
+        // Try matching by filename
+        let target_filename = std::path::Path::new(relative_path)
+            .file_name()?
+            .to_str()?;
+
+        for pair in files {
+            let pair_arr = pair.as_array()?;
+            if pair_arr.len() != 2 {
+                continue;
+            }
+            let key = pair_arr[0].as_str()?;
+            let entry = &pair_arr[1];
+
+            let key_filename = std::path::Path::new(key)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+
+            if key_filename == target_filename || key == relative_path {
+                if let Some(url) = entry.get("url").and_then(|v| v.as_str()) {
+                    return Some(url.to_string());
+                }
+            }
+        }
+
+        None
+    }
+
     /// Run a thrustwork command
     async fn run_command(&self, args: &[&str]) -> Result<Output, std::io::Error> {
         let output = Command::new(binary_path())

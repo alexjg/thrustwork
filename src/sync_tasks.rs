@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::documents::{DirectoryDocument, FileContent, FileDocument};
 use crate::files::{self, FileInfo};
+use crate::move_detector::{self, DeletedFileCandidate, NewFileCandidate};
 use crate::scanner;
 use crate::snapshot::{Snapshot, SnapshotDirectoryEntry, SnapshotFileEntry};
 use crate::sync_ops;
@@ -189,6 +190,9 @@ pub enum SyncResult {
     /// File was deleted locally but modified remotely - restored it
     Restored { path: String },
 
+    /// File was moved/renamed (preserves document identity)
+    Moved { old_path: String, new_path: String },
+
     /// No changes needed for this file
     NoChange { path: String },
 
@@ -213,6 +217,7 @@ impl SyncResult {
             SyncResult::DeletedRemote { path } => path,
             SyncResult::DeletedLocal { path } => path,
             SyncResult::Restored { path } => path,
+            SyncResult::Moved { new_path, .. } => new_path,
             SyncResult::NoChange { path } => path,
             SyncResult::Error { path, .. } => path,
         }
@@ -246,6 +251,9 @@ pub struct SyncContext {
 
     /// The snapshot (wrapped in mutex for concurrent updates)
     pub snapshot: Arc<Mutex<Snapshot>>,
+
+    /// Move detection threshold (0.0-1.0, default 0.7)
+    pub move_threshold: f64,
 }
 
 impl SyncContext {
@@ -257,6 +265,7 @@ impl SyncContext {
         root_url: AutomergeUrl,
         exclude_patterns: Vec<String>,
         snapshot: Snapshot,
+        move_threshold: f64,
     ) -> Self {
         Self {
             repo,
@@ -265,6 +274,7 @@ impl SyncContext {
             root_url,
             exclude_patterns,
             snapshot: Arc::new(Mutex::new(snapshot)),
+            move_threshold,
         }
     }
 
@@ -293,6 +303,7 @@ pub struct SyncSummary {
     pub deleted_remote: usize,
     pub deleted_local: usize,
     pub restored: usize,
+    pub moved: usize,
     pub errors: Vec<(String, String)>, // (path, message)
 }
 
@@ -311,6 +322,7 @@ impl SyncSummary {
                 SyncResult::DeletedRemote { .. } => summary.deleted_remote += 1,
                 SyncResult::DeletedLocal { .. } => summary.deleted_local += 1,
                 SyncResult::Restored { .. } => summary.restored += 1,
+                SyncResult::Moved { .. } => summary.moved += 1,
                 SyncResult::NoChange { .. } => {}
                 SyncResult::Error { path, message } => {
                     summary.errors.push((path.clone(), message.clone()));
@@ -331,6 +343,7 @@ impl SyncSummary {
             || self.deleted_remote > 0
             || self.deleted_local > 0
             || self.restored > 0
+            || self.moved > 0
     }
 
     /// Print the summary to stdout
@@ -380,6 +393,10 @@ impl SyncSummary {
                 "Restored {} file(s) (deleted locally but modified remotely).",
                 self.restored
             );
+        }
+
+        if self.moved > 0 {
+            println!("Moved/renamed {} file(s).", self.moved);
         }
 
         for (path, message) in &self.errors {
@@ -935,12 +952,180 @@ async fn process_sync_directory(
         }
     }
 
-    // Process local-only entries (not in remote) - create documents and add to this directory
-    let mut new_entries: Vec<(String, String, AutomergeUrl)> = Vec::new(); // (name, type, url)
+    // ==========================================================================
+    // Move Detection
+    // ==========================================================================
+    // Detect file moves/renames: files that were deleted locally and new files
+    // that appeared locally with similar content should be treated as moves.
+
+    // Collect deleted file candidates (in snapshot + remote, but not locally)
+    let snapshot = ctx.snapshot.lock().await;
+    let mut deleted_candidates: Vec<(String, SnapshotFileEntry)> = Vec::new();
+    for (snap_path, entry) in snapshot.files.iter() {
+        // Check if this file is in the current directory
+        let file_path = PathBuf::from(snap_path);
+        let parent = file_path.parent().map(|p| p.to_string_lossy().to_string());
+        let in_this_dir = parent.as_deref() == Some(&path_str)
+            || (path_str.is_empty() && !snap_path.contains('/') && !snap_path.contains('\\'));
+
+        if !in_this_dir {
+            continue;
+        }
+
+        let name = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        // File is a deletion candidate if: in snapshot, in remote, but NOT locally
+        if !local_names.contains(&name) && remote_names.contains(&name) {
+            deleted_candidates.push((name, entry.clone()));
+        }
+    }
+    drop(snapshot);
+
+    // Collect new file candidates (local files not in snapshot and not in remote)
+    let mut new_file_candidates: Vec<(String, PathBuf)> = Vec::new();
+    for (name, local_path) in &local_entries {
+        if local_path.is_file() && !remote_names.contains(name) && !snapshot_entries.contains(name) {
+            new_file_candidates.push((name.clone(), local_path.clone()));
+        }
+    }
+
+    // Detect moves if we have both deleted and new candidates
+    let mut moved_files: HashSet<String> = HashSet::new(); // names that were part of a move
+    let mut renamed_entries: Vec<(String, String, AutomergeUrl)> = Vec::new(); // (old_name, new_name, url)
     let mut results = Vec::new();
+
+    if !deleted_candidates.is_empty() && !new_file_candidates.is_empty() && ctx.move_threshold < 1.0 {
+        // Build candidates for move detection
+        let mut deleted_for_detection: Vec<DeletedFileCandidate> = Vec::new();
+        for (name, entry) in &deleted_candidates {
+            // Get the content of the deleted file from the remote document
+            if let Ok(Some(file_handle)) = ctx.repo.find(entry.url.doc_id().clone()).await {
+                file_handle.we_have_their_changes(ctx.conn_id).await;
+                let content = file_handle.with_document(|doc| {
+                    let file_doc: FileDocument = hydrate(doc).ok()?;
+                    Some(file_doc.content_bytes().to_vec())
+                });
+                if let Some(content) = content {
+                    deleted_for_detection.push(DeletedFileCandidate {
+                        name: name.clone(),
+                        content,
+                    });
+                }
+            }
+        }
+
+        let mut new_for_detection: Vec<NewFileCandidate> = Vec::new();
+        for (name, path) in &new_file_candidates {
+            if let Ok(content) = std::fs::read(path) {
+                new_for_detection.push(NewFileCandidate {
+                    name: name.clone(),
+                    content,
+                });
+            }
+        }
+
+        // Run move detection
+        let detected_moves = move_detector::detect_moves(
+            &deleted_for_detection,
+            &new_for_detection,
+            ctx.move_threshold,
+        );
+
+        // Process detected moves
+        for detected_move in detected_moves {
+            let old_name = &detected_move.old_name;
+            let new_name = &detected_move.new_name;
+
+            // Find the snapshot entry for the old file
+            let old_entry = deleted_candidates
+                .iter()
+                .find(|(n, _)| n == old_name)
+                .map(|(_, e)| e.clone());
+
+            if let Some(entry) = old_entry {
+                println!(
+                    "  Moving: {} -> {} (similarity: {:.0}%)",
+                    old_name,
+                    new_name,
+                    detected_move.similarity * 100.0
+                );
+
+                // Get file handle and update the name
+                if let Ok(Some(file_handle)) = ctx.repo.find(entry.url.doc_id().clone()).await {
+                    // Get extension from new filename
+                    let new_extension = PathBuf::from(new_name)
+                        .extension()
+                        .map(|e| e.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
+                    // Update the file document's name
+                    match sync_ops::update_file_name(&file_handle, new_name, &new_extension) {
+                        Ok(new_heads) => {
+                            // Wait for sync
+                            file_handle.they_have_our_changes(ctx.conn_id).await;
+
+                            // Track this as a renamed entry (for directory update)
+                            renamed_entries.push((old_name.clone(), new_name.clone(), entry.url.clone()));
+
+                            // Update snapshot: remove old path, add new path with same URL
+                            let new_relative = if relative_path.as_os_str().is_empty() {
+                                PathBuf::from(new_name)
+                            } else {
+                                relative_path.join(new_name)
+                            };
+                            let new_abs_path = ctx.absolute_path(&new_relative);
+
+                            let mut snapshot = ctx.snapshot.lock().await;
+                            snapshot.remove_file(&entry.path);
+                            snapshot.add_file(
+                                new_relative.display().to_string(),
+                                SnapshotFileEntry {
+                                    path: new_abs_path,
+                                    url: entry.url.clone(),
+                                    head: new_heads,
+                                    extension: new_extension,
+                                    mime_type: entry.mime_type.clone(),
+                                },
+                            );
+                            drop(snapshot);
+
+                            // Mark both old and new names as handled
+                            moved_files.insert(old_name.clone());
+                            moved_files.insert(new_name.clone());
+
+                            results.push(SyncResult::Moved {
+                                old_path: old_name.clone(),
+                                new_path: new_name.clone(),
+                            });
+                        }
+                        Err(e) => {
+                            results.push(SyncResult::Error {
+                                path: old_name.clone(),
+                                message: format!("Failed to rename file: {}", e),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ==========================================================================
+    // Process local-only entries (not in remote)
+    // ==========================================================================
+    // Skip files that were part of a move (already handled above)
+    let mut new_entries: Vec<(String, String, AutomergeUrl)> = Vec::new(); // (name, type, url)
 
     for (name, local_path) in &local_entries {
         if !remote_names.contains(name) {
+            // Skip if this was part of a move
+            if moved_files.contains(name) {
+                continue;
+            }
+
             // Check if this entry is in the snapshot (meaning it was previously synced)
             // If it's in snapshot but not in remote, it was deleted remotely - don't push it back
             let in_snapshot = snapshot_entries.contains(name);
@@ -1066,6 +1251,11 @@ async fn process_sync_directory(
     let mut entries_to_remove: Vec<String> = Vec::new();
 
     for (name, file_entry) in snapshot_files {
+        // Skip files that were part of a move (already handled)
+        if moved_files.contains(&name) {
+            continue;
+        }
+
         let exists_locally = local_names.contains(&name);
         let exists_in_remote = remote_names.contains(&name);
 
@@ -1161,14 +1351,34 @@ async fn process_sync_directory(
         }
     }
 
-    // Update this directory document: add new entries and remove deleted entries
-    if !new_entries.is_empty() || !entries_to_remove.is_empty() {
+    // Update this directory document: add new entries, rename entries, and remove deleted entries
+    // Note: For renames, we treat them as remove + add to avoid CRDT Text merging issues
+    let old_names_from_renames: HashSet<String> =
+        renamed_entries.iter().map(|(old, _, _)| old.clone()).collect();
+    let all_entries_to_remove: HashSet<String> = entries_to_remove
+        .iter()
+        .cloned()
+        .chain(old_names_from_renames)
+        .collect();
+
+    // Collect all new entries to add (including renamed files)
+    let mut all_new_entries: Vec<(String, String, AutomergeUrl)> = new_entries.clone();
+    for (_, new_name, url) in &renamed_entries {
+        all_new_entries.push((new_name.clone(), "file".to_string(), url.clone()));
+    }
+
+    if !all_new_entries.is_empty() || !all_entries_to_remove.is_empty() {
         // Load current document and modify entries
         handle.with_document(|doc| {
             let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
 
-            // Add new entries
-            for (name, entry_type, entry_url) in &new_entries {
+            // Remove entries first (deletions + old names from renames)
+            dir_doc
+                .docs
+                .retain(|entry| !all_entries_to_remove.contains(entry.name_str()));
+
+            // Add new entries (new files + renamed files)
+            for (name, entry_type, entry_url) in &all_new_entries {
                 if entry_type == "folder" {
                     dir_doc
                         .docs
@@ -1184,11 +1394,6 @@ async fn process_sync_directory(
                 }
             }
 
-            // Remove deleted entries
-            for name in &entries_to_remove {
-                dir_doc.docs.retain(|entry| entry.name_str() != name);
-            }
-
             doc.transact::<_, _, automerge::AutomergeError>(|txn| {
                 autosurgeon::reconcile(txn, &dir_doc).expect("Failed to reconcile directory");
                 Ok(())
@@ -1202,12 +1407,18 @@ async fn process_sync_directory(
 
     // Update snapshot with current directory state
     let dir_heads = sync_ops::get_document_heads(&handle);
+
+    // Collect old names from renames to exclude them
+    let renamed_old_names: HashSet<String> = renamed_entries.iter().map(|(old, _, _)| old.clone()).collect();
+
     let mut all_entry_names: Vec<String> = remote_entries
         .iter()
-        .filter(|(n, _, _)| !entries_to_remove.contains(n))
+        .filter(|(n, _, _)| !entries_to_remove.contains(n) && !renamed_old_names.contains(n))
         .map(|(n, _, _)| n.clone())
         .collect();
     all_entry_names.extend(new_entries.iter().map(|(n, _, _)| n.clone()));
+    // Add new names from renames
+    all_entry_names.extend(renamed_entries.iter().map(|(_, new, _)| new.clone()));
 
     let mut snapshot = ctx.snapshot.lock().await;
     snapshot.add_directory(

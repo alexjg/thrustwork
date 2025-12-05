@@ -311,6 +311,78 @@ pub fn update_file_document(
     })
 }
 
+/// Update the name and extension of a file document (for rename/move)
+///
+/// This updates the file document's name field to reflect a rename operation.
+/// Also updates the extension if it changed.
+/// Returns the new heads after the update.
+pub fn update_file_name(
+    handle: &DocHandle,
+    new_name: &str,
+    new_extension: &str,
+) -> Result<Vec<ChangeHash>, SyncError> {
+    handle.with_document(|doc| {
+        // Hydrate to get current FileDocument
+        let mut file_doc: FileDocument =
+            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+
+        // Update name and extension
+        file_doc.name = autosurgeon::Text::with_value(new_name);
+        file_doc.extension = autosurgeon::Text::with_value(new_extension);
+
+        // Reconcile changes back
+        doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+            reconcile(txn, &file_doc).map_err(|e| {
+                automerge::AutomergeError::InvalidObjId(format!("reconcile failed: {}", e))
+            })?;
+            Ok(())
+        })
+        .map_err(|e| SyncError::Reconcile(format!("{:?}", e)))?;
+
+        // Return new heads
+        Ok(doc.get_heads())
+    })
+}
+
+/// Rename an entry in a directory document
+///
+/// Finds the entry with the old name and updates it to the new name.
+/// Returns true if the entry was found and renamed, false otherwise.
+pub fn rename_directory_entry(
+    handle: &DocHandle,
+    old_name: &str,
+    new_name: &str,
+) -> Result<bool, SyncError> {
+    handle.with_document(|doc| {
+        // Hydrate the directory document
+        let mut dir: DirectoryDocument =
+            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+
+        // Find and update the entry with the old name
+        let mut found = false;
+        for entry in &mut dir.docs {
+            if entry.name_str() == old_name {
+                entry.name = autosurgeon::Text::with_value(new_name);
+                found = true;
+                break;
+            }
+        }
+
+        if found {
+            // Reconcile back to Automerge
+            doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+                reconcile(txn, &dir).map_err(|e| {
+                    automerge::AutomergeError::InvalidObjId(format!("reconcile failed: {}", e))
+                })?;
+                Ok(())
+            })
+            .map_err(|e| SyncError::Reconcile(format!("{:?}", e)))?;
+        }
+
+        Ok(found)
+    })
+}
+
 /// Create a SnapshotFileEntry for a synced file
 ///
 /// This captures the current state of the file document for the snapshot.

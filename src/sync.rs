@@ -45,6 +45,7 @@ pub async fn execute(paths: &PushworkPaths, config: &DirectoryConfig, repo: &Rep
         root_url,
         config.exclude_patterns.clone(),
         snapshot,
+        config.sync.move_detection_threshold,
     );
 
     println!("Syncing directory: {:?}", paths.root);

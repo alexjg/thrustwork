@@ -628,4 +628,41 @@ mod tests {
         assert!(hydrated.is_binary());
         assert_eq!(hydrated.as_binary(), Some(bytes.as_slice()));
     }
+
+    /// Test that reconcile correctly handles removing and adding directory entries.
+    ///
+    /// This verifies that when we hydrate a DirectoryDocument, modify the Vec
+    /// (remove entry, add new entry), and reconcile back, the Text fields are
+    /// correctly replaced rather than merged/concatenated.
+    #[test]
+    fn test_reconcile_directory_entry_replace() {
+        // Create directory with original entry
+        let mut doc = AutoCommit::new();
+        let dir_initial = DirectoryDocument::with_entries(vec![DirectoryEntry::file(
+            "original.txt".to_string(),
+            "automerge:abc123".to_string(),
+        )]);
+        reconcile(&mut doc, &dir_initial).expect("reconcile initial failed");
+
+        // Verify initial state
+        let dir_check1: DirectoryDocument = hydrate(&doc).expect("hydrate 1 failed");
+        assert_eq!(dir_check1.docs.len(), 1);
+        assert_eq!(dir_check1.docs[0].name_str(), "original.txt");
+
+        // Hydrate, modify (remove old, add new), and reconcile
+        let mut dir_updated: DirectoryDocument = hydrate(&doc).expect("hydrate 2 failed");
+        dir_updated.docs.retain(|e| e.name_str() != "original.txt");
+        dir_updated.docs.push(DirectoryEntry::file(
+            "newname.txt".to_string(),
+            "automerge:abc123".to_string(),
+        ));
+        reconcile(&mut doc, &dir_updated).expect("reconcile updated failed");
+
+        // Verify the result has the new entry with correct fields
+        let dir_final: DirectoryDocument = hydrate(&doc).expect("hydrate final failed");
+        assert_eq!(dir_final.docs.len(), 1);
+        assert_eq!(dir_final.docs[0].name_str(), "newname.txt");
+        assert_eq!(dir_final.docs[0].entry_type_str(), "file");
+        assert_eq!(dir_final.docs[0].url_str(), "automerge:abc123");
+    }
 }
