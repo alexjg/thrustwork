@@ -103,6 +103,22 @@ pub enum SyncTask {
         /// Absolute path on disk
         absolute_path: PathBuf,
     },
+
+    /// Delete a directory from the remote (directory was deleted locally)
+    DeleteRemoteDirectory {
+        /// Path relative to sync root
+        relative_path: PathBuf,
+        /// Absolute path on disk
+        absolute_path: PathBuf,
+    },
+
+    /// Delete a local directory (directory was deleted remotely)
+    DeleteLocalDirectory {
+        /// Path relative to sync root
+        relative_path: PathBuf,
+        /// Absolute path on disk
+        absolute_path: PathBuf,
+    },
 }
 
 impl SyncTask {
@@ -117,6 +133,8 @@ impl SyncTask {
             SyncTask::PushNewDirectory { relative_path, .. } => relative_path,
             SyncTask::DeleteRemoteFile { relative_path, .. } => relative_path,
             SyncTask::DeleteLocalFile { relative_path, .. } => relative_path,
+            SyncTask::DeleteRemoteDirectory { relative_path, .. } => relative_path,
+            SyncTask::DeleteLocalDirectory { relative_path, .. } => relative_path,
         }
     }
 
@@ -132,6 +150,8 @@ impl SyncTask {
             SyncTask::PushNewDirectory { .. } => format!("push new directory: {}", path),
             SyncTask::DeleteRemoteFile { .. } => format!("delete remote file: {}", path),
             SyncTask::DeleteLocalFile { .. } => format!("delete local file: {}", path),
+            SyncTask::DeleteRemoteDirectory { .. } => format!("delete remote directory: {}", path),
+            SyncTask::DeleteLocalDirectory { .. } => format!("delete local directory: {}", path),
         }
     }
 }
@@ -771,6 +791,14 @@ pub async fn process_task(task: SyncTask, ctx: &SyncContext) -> TaskOutput {
             relative_path,
             absolute_path,
         } => process_delete_local_file(relative_path, absolute_path, ctx).await,
+        SyncTask::DeleteRemoteDirectory {
+            relative_path,
+            absolute_path,
+        } => process_delete_remote_directory(relative_path, absolute_path, ctx).await,
+        SyncTask::DeleteLocalDirectory {
+            relative_path,
+            absolute_path,
+        } => process_delete_local_directory(relative_path, absolute_path, ctx).await,
     }
 }
 
@@ -865,7 +893,11 @@ async fn process_sync_directory(
 
         if entry_type == "folder" {
             // It's a directory
-            if exists_locally || in_snapshot {
+            if in_snapshot && !exists_locally {
+                // Directory was deleted locally - will be handled in deletion detection section
+                // Don't spawn SyncDirectory task, or it will re-fetch the directory
+                continue;
+            } else if exists_locally || in_snapshot {
                 // Known directory - sync it
                 new_tasks.push(SyncTask::SyncDirectory {
                     relative_path: child_relative,
@@ -909,6 +941,14 @@ async fn process_sync_directory(
 
     for (name, local_path) in &local_entries {
         if !remote_names.contains(name) {
+            // Check if this entry is in the snapshot (meaning it was previously synced)
+            // If it's in snapshot but not in remote, it was deleted remotely - don't push it back
+            let in_snapshot = snapshot_entries.contains(name);
+            if in_snapshot {
+                // This is a remote deletion case - will be handled in deletion detection section
+                continue;
+            }
+
             let child_relative = if relative_path.as_os_str().is_empty() {
                 PathBuf::from(name)
             } else {
@@ -997,6 +1037,9 @@ async fn process_sync_directory(
 
     // Detect deletions: files in snapshot but not locally or not in remote
     // We need to get snapshot file entries for this directory
+    // IMPORTANT: Exclude files we just pushed in this sync (they're in snapshot but not yet in remote)
+    let just_pushed_names: HashSet<String> = new_entries.iter().map(|(name, _, _)| name.clone()).collect();
+
     let snapshot = ctx.snapshot.lock().await;
     let snapshot_files: Vec<(String, SnapshotFileEntry)> = snapshot
         .files
@@ -1015,6 +1058,7 @@ async fn process_sync_directory(
                 .unwrap_or_default();
             (name, entry.clone())
         })
+        .filter(|(name, _)| !just_pushed_names.contains(name)) // Exclude just-pushed files
         .collect();
     drop(snapshot);
 
@@ -1052,6 +1096,67 @@ async fn process_sync_directory(
             new_tasks.push(SyncTask::DeleteLocalFile {
                 relative_path: child_relative,
                 absolute_path: abs_path,
+            });
+        }
+    }
+
+    // Detect directory deletions: directories in snapshot but not locally or not in remote
+    // Exclude directories we just created (they're in snapshot but not yet in remote)
+    let snapshot = ctx.snapshot.lock().await;
+    let snapshot_dirs: Vec<(String, SnapshotDirectoryEntry)> = snapshot
+        .directories
+        .iter()
+        .filter(|(path, _)| {
+            // Skip the root directory entry (empty path) - it's never a child
+            if path.is_empty() {
+                return false;
+            }
+            // Get the parent directory of this directory
+            let dir_path = PathBuf::from(path);
+            let parent = dir_path.parent().map(|p| p.to_string_lossy().to_string());
+            parent.as_deref() == Some(&path_str)
+                || (path_str.is_empty() && !path.contains('/') && !path.contains('\\'))
+        })
+        .map(|(path, entry)| {
+            let name = PathBuf::from(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (name, entry.clone())
+        })
+        .filter(|(name, _)| !just_pushed_names.contains(name)) // Exclude just-created directories
+        .collect();
+    drop(snapshot);
+
+    for (name, dir_entry) in snapshot_dirs {
+        let exists_locally = local_names.contains(&name);
+        let exists_in_remote = remote_names.contains(&name);
+
+        let child_relative = if relative_path.as_os_str().is_empty() {
+            PathBuf::from(&name)
+        } else {
+            relative_path.join(&name)
+        };
+
+        if !exists_locally && exists_in_remote {
+            // Directory was deleted locally but exists remotely
+            // Remove from remote directory document
+            new_tasks.push(SyncTask::DeleteRemoteDirectory {
+                relative_path: child_relative,
+                absolute_path: dir_entry.path.clone(),
+            });
+            entries_to_remove.push(name.clone());
+        } else if !exists_locally && !exists_in_remote {
+            // Directory was deleted both locally and remotely - just clean up snapshot
+            println!("  Cleaning up: {}/ (deleted)", child_relative.display());
+            let mut snapshot = ctx.snapshot.lock().await;
+            snapshot.remove_directory(&dir_entry.path);
+            drop(snapshot);
+        } else if exists_locally && !exists_in_remote {
+            // Directory exists locally but not in remote - this is a remote deletion
+            new_tasks.push(SyncTask::DeleteLocalDirectory {
+                relative_path: child_relative,
+                absolute_path: dir_entry.path.clone(),
             });
         }
     }
@@ -1616,6 +1721,73 @@ async fn process_delete_local_file(
         Err(e) => TaskOutput::result(SyncResult::Error {
             path: path_str,
             message: format!("Failed to delete file: {}", e),
+        }),
+    }
+}
+
+/// Process DeleteRemoteDirectory: remove directory entry from parent's directory document
+///
+/// Unlike files, we don't check for remote modifications for directories.
+/// If the directory was deleted locally, we remove it from the remote.
+async fn process_delete_remote_directory(
+    _relative_path: PathBuf,
+    absolute_path: PathBuf,
+    ctx: &SyncContext,
+) -> TaskOutput {
+    let path_str = absolute_path.display().to_string();
+
+    println!("  Deleting directory remotely: {}", path_str);
+
+    // Remove from snapshot (the directory entry removal from parent doc
+    // is handled by process_sync_directory via entries_to_remove)
+    let mut snapshot = ctx.snapshot.lock().await;
+    snapshot.remove_directory(&absolute_path);
+    drop(snapshot);
+
+    TaskOutput::result(SyncResult::DeletedRemote { path: path_str })
+}
+
+/// Process DeleteLocalDirectory: delete local directory that was deleted remotely
+///
+/// Uses recursive deletion (remove_dir_all) to handle non-empty directories.
+async fn process_delete_local_directory(
+    _relative_path: PathBuf,
+    absolute_path: PathBuf,
+    ctx: &SyncContext,
+) -> TaskOutput {
+    let path_str = absolute_path.display().to_string();
+
+    println!("  Deleting directory locally: {}", path_str);
+
+    // Delete the local directory recursively
+    match std::fs::remove_dir_all(&absolute_path) {
+        Ok(()) => {
+            // Remove from snapshot
+            let mut snapshot = ctx.snapshot.lock().await;
+            snapshot.remove_directory(&absolute_path);
+            // Also remove any files that were inside this directory
+            let prefix = absolute_path.to_string_lossy();
+            snapshot.files.retain(|(_, entry)| {
+                !entry.path.to_string_lossy().starts_with(prefix.as_ref())
+            });
+            snapshot.directories.retain(|(_, entry)| {
+                !entry.path.to_string_lossy().starts_with(prefix.as_ref())
+            });
+            drop(snapshot);
+
+            TaskOutput::result(SyncResult::DeletedLocal { path: path_str })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Directory already gone - just clean up snapshot
+            let mut snapshot = ctx.snapshot.lock().await;
+            snapshot.remove_directory(&absolute_path);
+            drop(snapshot);
+
+            TaskOutput::result(SyncResult::NoChange { path: path_str })
+        }
+        Err(e) => TaskOutput::result(SyncResult::Error {
+            path: path_str,
+            message: format!("Failed to delete directory: {}", e),
         }),
     }
 }

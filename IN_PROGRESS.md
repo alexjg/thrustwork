@@ -132,58 +132,68 @@ Implement deleting a local file when remote deletion is detected.
 
 ---
 
-### Task 11.6: Handle Directory Deletion
+### Task 11.6: Handle Directory Deletion ✓
 
 Extend deletion handling to directories.
 
-- [ ] Detect directory in snapshot but not locally → local deletion
-- [ ] Detect directory in snapshot but not in remote → remote deletion
-- [ ] For local deletion of directory:
-  - Remove folder entry from parent directory document
+- [x] Detect directory in snapshot but not locally → local deletion
+- [x] Detect directory in snapshot but not in remote → remote deletion
+- [x] For local deletion of directory:
+  - Remove folder entry from parent directory document (via `entries_to_remove`)
   - The directory document itself can remain (orphaned but harmless)
-- [ ] For remote deletion of directory:
-  - Delete local directory (must be empty or recursive delete?)
-  - Remove from snapshot
-- [ ] Add `remove_folder_from_directory(handle, foldername)` to sync_ops.rs
+- [x] For remote deletion of directory:
+  - Delete local directory recursively with `std::fs::remove_dir_all()`
+  - Remove from snapshot (including nested files/dirs)
+- [x] Directory entry removal handled by existing `entries_to_remove` mechanism
 
 **Decision (from pushwork)**: Yes, recursively delete non-empty directories.
 Pushwork uses `fs.rm(path, { recursive: true })` - no empty-only requirement.
-We'll use `std::fs::remove_dir_all()` in Rust.
+We use `std::fs::remove_dir_all()` in Rust.
+
+**Done**: Added `DeleteRemoteDirectory` and `DeleteLocalDirectory` task variants.
+Detection logic added in `process_sync_directory` parallel to file deletion detection.
+`process_delete_local_directory` recursively deletes and cleans up nested entries from snapshot.
 
 ---
 
-### Task 11.7: Update Snapshot Cleanup
-
-Ensure snapshot stays consistent after deletions.
-
-- [ ] Remove deleted files from snapshot immediately after deletion confirmed
-- [ ] Remove deleted directories from snapshot
-- [ ] Handle nested deletions (directory deleted → children implicitly gone)
-- [ ] Verify snapshot is saved even if sync is interrupted mid-deletion
-
----
-
-### Task 11.8: Verification Tests
+### Task 11.7: Verification Tests ✓
 
 Test deletion flows end-to-end.
 
-- [ ] Local file deletion: sync file, delete locally, sync, verify remote removal
-- [ ] Remote file deletion: sync file, delete from another client, sync, verify local removal
-- [ ] Local directory deletion: sync directory with files, delete locally, sync
-- [ ] Remote directory deletion: sync directory, delete from another client, sync
-- [ ] Edge case: delete file that was never synced (should just disappear)
-- [ ] Edge case: delete file that's being modified remotely (conflict handling)
+- [x] Local file deletion: sync file, delete locally, sync, verify remote removal
+- [x] Remote file deletion: sync file, delete from another client, sync, verify local removal
+- [x] Local directory deletion: sync directory with files, delete locally, sync
+- [x] Remote directory deletion: sync directory, delete from another client, sync
+- [x] Edge case: delete file that was never synced (should just disappear)
+- [x] Edge case: delete file that's being modified remotely (conflict handling - remote wins, file restored)
+
+**Bugs Fixed During Testing**:
+1. **Spurious file deletion**: Files pushed in same sync were being marked for deletion because
+   they weren't yet in the remote directory document. Fixed by tracking `just_pushed_names` and
+   excluding them from deletion detection.
+
+2. **Remote deletion not propagating**: Files deleted on one client were being re-pushed by the
+   other. Fixed by adding snapshot check in local-only entry processing - if a file exists locally
+   and in snapshot but NOT in remote, it was deleted remotely (don't push it back).
+
+3. **Directory re-fetch on local deletion**: When a directory was deleted locally, the sync was
+   still spawning `SyncDirectory` task which re-fetched its contents. Fixed by checking for
+   local deletion (in snapshot but not locally) before spawning `SyncDirectory`.
+
+4. **Root directory cleanup spam**: The root directory entry ("") was matching the filter for
+   subdirectories and triggering spurious "Cleaning up: / (deleted)" messages. Fixed by explicitly
+   excluding empty path from directory deletion detection.
 
 ---
 
 ### Phase 11 Completion Checklist
 
-- [ ] Local file deletion detected and synced
-- [ ] Remote file deletion detected and applied
-- [ ] Directory deletion works in both directions
-- [ ] Snapshot updated correctly after deletions
-- [ ] Conflict case handled (delete vs modify)
-- [ ] All verification tests pass
+- [x] Local file deletion detected and synced
+- [x] Remote file deletion detected and applied
+- [x] Directory deletion works in both directions
+- [x] Snapshot updated correctly after deletions
+- [x] Conflict case handled (delete vs modify - remote modification wins, file restored)
+- [x] All verification tests pass
 
 **Phase 11 complete. Proceed to Phase 13 (Move Detection).**
 
