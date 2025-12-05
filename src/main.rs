@@ -55,6 +55,9 @@ enum Commands {
         url: String,
     },
 
+    /// Print the root directory URL
+    Url,
+
     /// Create test file+directory for pushwork interop testing
     CreateTest,
 
@@ -384,6 +387,35 @@ async fn main() {
                 }
                 Err(e) => {
                     eprintln!("Clone failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Url => {
+            // Find the .pushwork directory
+            let cwd = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("Failed to get current directory: {}", e);
+                std::process::exit(1);
+            });
+
+            let paths = init::PushworkPaths::find_from(&cwd).unwrap_or_else(|| {
+                eprintln!("Not in a thrustwork directory (no .pushwork found)");
+                eprintln!("Run 'thrustwork init' to initialize this directory.");
+                std::process::exit(1);
+            });
+
+            // Load the config
+            let config = config::DirectoryConfig::load(&paths.config_file).unwrap_or_else(|e| {
+                eprintln!("Failed to load config: {}", e);
+                std::process::exit(1);
+            });
+
+            // Print the root URL
+            match config.root_directory_url {
+                Some(url) => println!("{}", url),
+                None => {
+                    eprintln!("No root directory URL configured.");
+                    eprintln!("This directory may not be fully initialized.");
                     std::process::exit(1);
                 }
             }

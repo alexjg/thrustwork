@@ -525,3 +525,44 @@ async fn test_cross_directory_move_syncs_to_other_client() {
         "Content that will be moved cross-directory"
     );
 }
+
+// =============================================================================
+// CLI Command Tests
+// =============================================================================
+
+/// Test the url command prints the root URL
+#[tokio::test]
+async fn test_url_command() {
+    let harness = TestHarness::new().await;
+    let client = harness.create_client("test").await;
+
+    // Initialize the directory
+    client.init().await.unwrap();
+
+    // Get root URL from config for comparison
+    let expected_url = client.root_url().await.expect("Should have root URL after init");
+
+    // Run the url command
+    let output = client.url_command().await.unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The output should be the URL followed by a newline
+    assert_eq!(stdout.trim(), expected_url);
+}
+
+/// Test the url command fails gracefully when not initialized
+#[tokio::test]
+async fn test_url_command_not_initialized() {
+    let harness = TestHarness::new().await;
+    let client = harness.create_client("test").await;
+
+    // Don't initialize - just try to run url command
+    let output = client.run_command_raw(&["url"]).await.unwrap();
+
+    // Should fail with non-zero exit code
+    assert!(!output.status.success(), "url command should fail when not initialized");
+
+    // Should have helpful error message
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Not in a thrustwork directory") || stderr.contains(".pushwork"));
+}

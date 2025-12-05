@@ -191,6 +191,23 @@ impl TestClient {
         Ok(output)
     }
 
+    /// Run thrustwork url command
+    pub async fn url_command(&self) -> Result<Output, std::io::Error> {
+        let output = self.run_command(&["url"]).await?;
+
+        if !output.status.success() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "url failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            ));
+        }
+
+        Ok(output)
+    }
+
     /// Get the root URL from the config
     pub async fn root_url(&self) -> Option<String> {
         let config_path = self.path.join(".pushwork/config.json");
@@ -306,6 +323,11 @@ impl TestClient {
         }
 
         None
+    }
+
+    /// Run a thrustwork command (raw, without checking success)
+    pub async fn run_command_raw(&self, args: &[&str]) -> Result<Output, std::io::Error> {
+        self.run_command(args).await
     }
 
     /// Run a thrustwork command
