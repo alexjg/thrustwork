@@ -8,7 +8,7 @@ See DESIGN.md for the high-level design and technical specifications.
 
 ## Implementation Phases
 
-### Phase 1: Connect to Sync Server
+### Phase 1: Connect to Sync Server ✓
 
 **Goal**: Verify we can use samod to connect to the Automerge sync server and
 create/read documents. This validates our core dependency before building
@@ -17,21 +17,11 @@ anything else.
 **Deliverable**: A minimal binary that connects to the sync server, creates a
 document, and prints its URL.
 
-**Work**:
-- Set up Cargo.toml with samod, automerge, and tokio
-- Write a main.rs that:
-  - Initializes a samod Repo with in-memory storage
-  - Connects to `wss://sync3.automerge.org` via WebSocket
-  - Creates a simple document and writes a test value
-  - Prints the document URL
-  - Waits briefly for sync, then shuts down
-
-**验证**: Run the binary, copy the URL, run again with that URL to verify the
-document synced.
+**Status**: Complete
 
 ---
 
-### Phase 2: Read and Write Pushwork Documents
+### Phase 2: Read and Write Pushwork Documents ✓
 
 **Goal**: Create documents that match the pushwork schema and verify
 interoperability.
@@ -39,180 +29,100 @@ interoperability.
 **Deliverable**: Can create file and directory documents that pushwork can
 read, and can read documents created by pushwork.
 
-**Work**:
-- Define minimal types for file and directory documents (just enough to
-  serialize the schema)
-- Implement creating a file document with the correct structure:
-  - `@patchwork.type: "file"`
-  - `name`, `extension`, `mimeType`
-  - `content` as Text or Bytes
-  - `metadata.permissions`
-- Implement creating a directory document:
-  - `@patchwork.type: "folder"`
-  - `docs` array with entries
-- Implement reading file content from a document
-- Test by creating documents with thrustwork and reading with pushwork (and
-  vice versa)
-
-**Verification**: Create a file document with thrustwork, sync, verify pushwork
-can read it. Create a directory with pushwork, verify thrustwork can traverse
-it.
+**Status**: Complete
 
 ---
 
-### Phase 3: Initialize a Directory
+### Phase 3: Initialize a Directory ✓
 
 **Goal**: Implement the `init` command to set up a directory for syncing.
 
 **Deliverable**: `thrustwork init` creates the `.pushwork` folder, config file,
 and root directory document.
 
-**Work**:
-- Add clap for CLI parsing (just `init` command for now)
-- Implement minimal config structure and serialization
-- Create `.pushwork/` directory
-- Create `.pushwork/config.json` with root directory URL and defaults
-- Create root directory document (empty `docs` array)
-- Use filesystem storage for the repo (in `.pushwork/repo/`)
-- Implement basic error handling for this path
-
-**Verification**: Run `thrustwork init` in a test directory. Verify config file
-exists and contains a valid Automerge URL. Run pushwork against the same URL
-and verify it sees an empty directory.
+**Status**: Complete
 
 ---
 
-### Phase 4: Push a Single File
+### Phase 4: Push a Single File ✓
 
 **Goal**: Sync a single local file to the remote.
 
 **Deliverable**: After `init`, creating a file and running `thrustwork sync`
 pushes it to the remote.
 
-**Work**:
-- Implement minimal snapshot structure (just enough to track one file)
-- Implement reading a file from disk (detect text vs binary)
-- Implement MIME type detection for the file
-- Create file document from local file content
-- Add entry to root directory document
-- Save snapshot with the new file entry
-- Wait for sync to complete
-
-**Verification**: Init, create a text file, run sync. Use pushwork (or another
-thrustwork instance) to clone the URL and verify the file appears.
+**Status**: Complete
 
 ---
 
-### Phase 5: Pull a Single File
+### Phase 5: Pull a Single File ✓
 
 **Goal**: Sync a remote file to the local filesystem.
 
 **Deliverable**: Clone a pushwork directory containing one file.
 
-**Work**:
-- Add `clone` command that takes an Automerge URL
-- Load root directory document from URL
-- Traverse directory to find file entries
-- Read file document content
-- Write content to local filesystem
-- Create snapshot with the pulled file
-
-**Verification**: Create a directory with pushwork containing one file. Run
-`thrustwork clone <url>`. Verify the file appears locally.
+**Status**: Complete
 
 ---
 
-### Phase 6: Detect and Sync Local Changes
+### Phase 6: Detect and Sync Local Changes ✓
 
 **Goal**: Detect when a tracked file has changed and push the update.
 
 **Deliverable**: Modify a synced file, run sync, change is pushed.
 
-**Work**:
-- Implement snapshot loading
-- Compare local file content against snapshot (by reading the document at
-  snapshot heads)
-- Detect LOCAL_ONLY change type
-- Update existing file document with new content
-- Update snapshot with new heads
-
-**Verification**: Clone a file, modify it locally, run sync. Verify the change
-appears on another client.
+**Status**: Complete
 
 ---
 
-### Phase 7: Binary File Support
+### Phase 7: Binary File Support ✓
 
 **Goal**: Support syncing binary files (images, PDFs, etc.) in addition to text.
 
 **Deliverable**: Binary files can be pushed, pulled, and synced like text files.
 
-**Work**:
-- Update FileDocument to store binary content using Automerge `Bytes` type
-- Modify file reading to preserve binary content (no UTF-8 conversion)
-- Update file writing to handle binary content
-- Remove "binary files not yet supported" skipping throughout codebase
-- Ensure MIME type detection works for common binary formats
-- Update snapshot to track whether a file is text or binary
-
-**Verification**: Create a directory with a PNG image, sync with thrustwork.
-Clone elsewhere and verify the image is identical (byte-for-byte). Modify the
-image, sync, verify the change propagates.
+**Status**: Complete
 
 ---
 
-### Phase 8: Detect and Apply Remote Changes
+### Phase 8: Detect and Apply Remote Changes ✓
 
 **Goal**: Detect when a remote file has changed and pull the update.
 
 **Deliverable**: When a file changes remotely, sync pulls it.
 
-**Work**:
-- Compare document heads against snapshot heads to detect remote changes
-- Detect REMOTE_ONLY change type
-- Read updated content from document
-- Write to local filesystem
-- Update snapshot
-
-**Verification**: Sync a file on two clients. Modify on client A, sync. Sync
-on client B, verify it receives the change.
+**Status**: Complete (includes CRDT merge for conflicts)
 
 ---
 
-### Phase 9: Handle Multiple Files
+### Phase 9: Handle Multiple Files ✓
 
 **Goal**: Sync directories with multiple files.
 
 **Deliverable**: Init/clone/sync works with multiple files in the root
 directory.
 
-**Work**:
-- Extend filesystem scanning to list all files (with exclusion patterns)
-- Process multiple files in change detection
-- Create multiple file documents when pushing
-- Pull multiple files when cloning
-- Update snapshot with all files
-
-**Verification**: Create a directory with several files, init, sync. Clone
-elsewhere and verify all files appear.
+**Status**: Complete
 
 ---
 
-### Phase 10: Handle Subdirectories
+### Phase 10: Handle Subdirectories ✓
 
-**Goal**: Support nested directory structures.
+**Goal**: Support nested directory structures with efficient parallel syncing.
 
-**Deliverable**: Sync works with files in subdirectories.
+**Deliverable**: Sync works with files in subdirectories, processing directories
+and files in parallel as they become available.
 
-**Work**:
-- Create directory documents for subdirectories
-- Link parent directory to child directory documents
-- Recursive directory traversal for scanning
-- Recursive traversal for pulling remote directories
-- Path handling for nested files in snapshot
+**Status**: Complete
 
-**Verification**: Create nested directory structure, sync. Clone and verify
-structure is preserved.
+**Architecture Note**: This phase introduced a parallel task-based architecture
+using `FuturesUnordered` that significantly simplified the codebase. The new
+architecture:
+- Processes sync operations as parallel tasks
+- Discovers nested directories incrementally
+- Handles new remote files automatically (originally Phase 12)
+- Implements two-phase sync implicitly (originally Phase 14)
+- Updates snapshot incrementally during sync
 
 ---
 
@@ -224,31 +134,23 @@ structure is preserved.
 versa).
 
 **Work**:
-- Detect local deletion (file in snapshot but not on filesystem)
-- Remove entry from parent directory document
-- Detect remote deletion (entry removed from directory)
-- Delete local file
-- Remove from snapshot
+- In `process_sync_directory`, detect files in snapshot but not on local disk
+  (local deletion) - remove from remote directory document
+- In `process_sync_directory`, detect files in snapshot but not in remote
+  directory (remote deletion) - delete local file
+- Remove deleted files from snapshot
+- Handle directory deletion (empty directories, recursive deletion)
 
 **Verification**: Sync a file, delete it locally, sync. Verify remote directory
 no longer contains it. Reverse: delete remotely, sync, verify local deletion.
 
 ---
 
-### Phase 12: Handle New Remote Files
+### ~~Phase 12: Handle New Remote Files~~ (Merged into Phase 10)
 
-**Goal**: Discover and pull files added remotely that aren't in our snapshot.
-
-**Deliverable**: When a peer adds a new file, we pull it.
-
-**Work**:
-- Traverse remote directory hierarchy to find files not in snapshot
-- This completes the change detection algorithm from DESIGN.md Appendix C
-- Create local files for new remote entries
-- Add to snapshot
-
-**Verification**: Two clients synced. Client A adds a new file, syncs. Client B
-syncs and receives the new file.
+**Status**: Complete - handled by `FetchNewFile` task in the parallel sync
+architecture. When `SyncDirectory` finds a remote file not in our snapshot,
+it automatically fetches it.
 
 ---
 
@@ -260,33 +162,29 @@ syncs and receives the new file.
 delete+create.
 
 **Work**:
+- In `process_sync_directory`, when we detect both a local deletion and a
+  local-only file, check for content similarity
 - Implement string similarity (Sørensen–Dice coefficient)
-- Identify deleted files with known remote content
-- Identify new files not in snapshot
-- Match by similarity above threshold
-- Update directory entries and file name instead of delete+create
+- If similarity exceeds threshold, treat as rename:
+  - Update directory entry name instead of delete+create
+  - Update file document's `name` field
+  - Preserve document URL in snapshot
 
 **Verification**: Sync a file, rename it locally, sync. Verify the document URL
 is preserved (same document, new name).
 
 ---
 
-### Phase 14: Two-Phase Sync
+### ~~Phase 14: Two-Phase Sync~~ (Merged into Phase 10)
 
-**Goal**: Implement the full two-phase sync algorithm for correctness.
+**Status**: Complete - the parallel task architecture implicitly implements
+two-phase sync:
+1. Each task waits for remote changes (`we_have_their_changes`) before comparing
+2. Local changes are pushed and we wait for confirmation (`they_have_our_changes`)
+3. Conflicts are resolved via CRDT merge (already implemented in Phase 8)
 
-**Deliverable**: Sync handles concurrent changes correctly.
-
-**Work**:
-- Phase 1: Push all local changes
-- Wait for network sync completion
-- Add post-sync delay for peer propagation
-- Re-run change detection
-- Phase 2: Pull remote changes
-- Handle BOTH_CHANGED by merging (text) or preferring remote (binary)
-
-**Verification**: Concurrent edits on two clients. Both sync. Verify both end
-up with merged result.
+The architecture ensures we always have the latest remote state before making
+decisions, and concurrent edits merge correctly.
 
 ---
 
@@ -298,10 +196,15 @@ up with merged result.
 
 **Work**:
 - `status`: Show pending changes without syncing
-- `commit`: Push local changes without pulling (for offline work)
+  - Run change detection but don't apply changes
+  - Print summary of local changes, remote changes, conflicts
 - `url`: Print the root directory URL
 - Add `--verbose` flag for detailed output
 - Improve error messages and user feedback
+
+**Note**: The `commit` command (push without pulling) may not be needed since
+the parallel architecture handles this naturally - you can interrupt sync
+after pushing completes.
 
 **Verification**: Each command works as expected.
 
@@ -314,10 +217,10 @@ up with merged result.
 **Deliverable**: Global and local config files are respected.
 
 **Work**:
-- Load global config from `~/.pushwork/config.json`
-- Merge with local config
-- Support custom sync server URL
-- Support custom exclude patterns
+- Load global config from `~/.config/thrustwork/config.json`
+- Merge with local config (local takes precedence)
+- Support custom sync server URL (already works)
+- Support custom exclude patterns (already works)
 - Support custom move detection threshold
 
 **Verification**: Set a custom exclude pattern, verify files are excluded.
@@ -331,12 +234,12 @@ up with merged result.
 **Deliverable**: Production-ready error handling.
 
 **Work**:
-- Graceful handling of network disconnection
-- Timeout handling for sync wait
-- Partial sync (continue on individual file errors)
-- Proper cleanup on shutdown
+- Graceful handling of network disconnection mid-sync
+- Timeout handling for sync wait (don't hang forever)
+- Partial sync (continue on individual file errors) - already partially done
+- Proper cleanup on shutdown (save snapshot even on interrupt)
 - Handle permission errors on file operations
-- Validate snapshot integrity
+- Validate snapshot integrity on load
 
 **Verification**: Interrupt sync mid-operation, verify no corruption. Simulate
 network issues.
@@ -350,9 +253,40 @@ network issues.
 | M1: Connected | 1-2 | Can create/read pushwork-compatible documents |
 | M2: Single file | 3-6 | Init, push one file, clone one file, detect changes |
 | M3: Binary + remote | 7-8 | Binary file support, pull remote changes |
-| M4: Full tree | 9-10 | Multiple files, nested directories |
-| M5: Complete sync | 11-14 | Deletions, new files, moves, two-phase |
+| M4: Full tree | 9-10 | Multiple files, nested directories, new remote files |
+| M5: Complete sync | 11, 13 | Deletions, moves |
 | M6: Production | 15-17 | Full CLI, configuration, robustness |
+
+## Architecture Notes
+
+### Parallel Task-Based Sync (Phase 10)
+
+The sync system uses a work queue (`FuturesUnordered`) with task types:
+
+```
+SyncTask:
+- SyncDirectory: Compare local/remote/snapshot, spawn child tasks
+- SyncFile: Compare content, push/pull/merge as needed
+- FetchNewFile: Pull file not in snapshot
+- FetchNewDirectory: Pull directory not locally present
+```
+
+Key benefits:
+1. **Parallel processing**: Independent files/directories sync concurrently
+2. **Incremental discovery**: Nested directories discovered as parent syncs
+3. **Unified flow**: Push, pull, and merge all happen in one pass
+4. **Implicit two-phase**: Wait for remote state before comparing
+
+The `SyncContext` holds shared state including a `Mutex<Snapshot>` for
+thread-safe incremental updates.
+
+### Clone Architecture
+
+Clone uses a similar but simpler task set (`CloneTask`) that only fetches:
+- `FetchDirectory`: Fetch directory doc, spawn tasks for contents
+- `FetchFile`: Fetch file doc, write to disk
+
+No comparison logic needed since there's no existing local state.
 
 ## Notes
 
