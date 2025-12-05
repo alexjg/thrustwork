@@ -43,274 +43,128 @@ The overall design we are working on is described in DESIGN.md and the separate 
 
 ---
 
-## Phase 11: Handle File Deletion
+## Phase 13: Move Detection
 
-**Goal**: Sync file deletions in both directions.
+**Goal**: Detect file moves/renames and preserve document identity.
 
-**Deliverable**: Delete a file locally, sync removes it remotely (and vice versa).
-
-**Architecture Context**:
-The parallel sync architecture in `process_sync_directory` already compares:
-- Local filesystem entries
-- Remote directory document entries
-- Snapshot entries
-
-Deletion detection fits naturally: files in snapshot but missing from local or remote
-indicate deletion. The key challenge is distinguishing "deleted" from "not yet synced".
-
----
-
-### Task 11.1: Detect Local File Deletion ✓
-
-Extend `process_sync_directory` to detect files that exist in snapshot but not on disk.
-
-- [x] In `process_sync_directory`, after gathering local/remote/snapshot sets:
-  - Find files in snapshot that are NOT in local filesystem
-  - These are candidates for local deletion
-- [x] For each locally-deleted file:
-  - If file also exists in remote → it was deleted locally, needs remote removal
-  - If file doesn't exist in remote → already deleted remotely, just clean snapshot
-- [x] Add `SyncResult::DeletedRemote`, `DeletedLocal`, `Restored` variants for reporting
-
-**Done**: Added deletion detection in `process_sync_directory`. Gets snapshot files for
-the current directory and compares against local/remote sets. Spawns appropriate tasks:
-- `DeleteRemoteFile` for locally-deleted files still in remote
-- `DeleteLocalFile` for remotely-deleted files still locally
-
----
-
-### Task 11.2: Remove Entry from Remote Directory ✓
-
-Implement removing a file entry from a directory document.
-
-- [x] Add `remove_entry_from_directory(handle, name)` to sync_ops.rs
-- [x] Remove the entry from the directory's `docs` array by name
-- [x] Reconcile changes back to Automerge
-
-**Done**: Added `remove_entry_from_directory()` function. Also, entry removal is now
-handled directly in `process_sync_directory` via the `entries_to_remove` list.
-
----
-
-### Task 11.3: Handle Local File Deletion in Sync ✓
-
-Wire up local deletion detection to actually remove from remote.
-
-- [x] When local deletion detected, spawn `DeleteRemoteFile` task
-- [x] `process_delete_remote_file` checks for remote modifications
-- [x] If remote was modified, restore file locally (remote wins)
-- [x] If no remote changes, remove from directory doc and snapshot
-- [x] Report appropriate `SyncResult` variant
-
-**Decision (from pushwork)**: Remote modification wins - restore file locally with remote content.
-Rationale: In CRDT systems, modifications win over deletions to prevent data loss.
-If someone edited the file, they want it to exist.
-
-**Done**: `process_delete_remote_file` compares current document heads with snapshot heads.
-If different, writes remote content to disk (restore). If same, removes entry from directory
-document via `entries_to_remove`.
-
----
-
-### Task 11.4: Detect Remote File Deletion ✓
-
-Extend `process_sync_directory` to detect files deleted on remote.
-
-- [x] Find files in snapshot that are NOT in remote directory document
-- [x] These were deleted remotely
-- [x] If file exists locally → spawn `DeleteLocalFile` task
-- [x] If file doesn't exist locally → just clean snapshot (already deleted both sides)
-
-**Done**: Detection added in `process_sync_directory`. Files in snapshot but not in remote
-and existing locally trigger `DeleteLocalFile` task.
-
----
-
-### Task 11.5: Delete Local File ✓
-
-Implement deleting a local file when remote deletion is detected.
-
-- [x] Delete the file from local filesystem using `std::fs::remove_file`
-- [x] Remove from snapshot
-- [x] Report `SyncResult::DeletedLocal { path }`
-- [x] Handle errors gracefully (file already gone → NoChange, permission denied → Error)
-
-**Done**: `process_delete_local_file` handles all cases including file already deleted.
-
----
-
-### Task 11.6: Handle Directory Deletion ✓
-
-Extend deletion handling to directories.
-
-- [x] Detect directory in snapshot but not locally → local deletion
-- [x] Detect directory in snapshot but not in remote → remote deletion
-- [x] For local deletion of directory:
-  - Remove folder entry from parent directory document (via `entries_to_remove`)
-  - The directory document itself can remain (orphaned but harmless)
-- [x] For remote deletion of directory:
-  - Delete local directory recursively with `std::fs::remove_dir_all()`
-  - Remove from snapshot (including nested files/dirs)
-- [x] Directory entry removal handled by existing `entries_to_remove` mechanism
-
-**Decision (from pushwork)**: Yes, recursively delete non-empty directories.
-Pushwork uses `fs.rm(path, { recursive: true })` - no empty-only requirement.
-We use `std::fs::remove_dir_all()` in Rust.
-
-**Done**: Added `DeleteRemoteDirectory` and `DeleteLocalDirectory` task variants.
-Detection logic added in `process_sync_directory` parallel to file deletion detection.
-`process_delete_local_directory` recursively deletes and cleans up nested entries from snapshot.
-
----
-
-### Task 11.7: Verification Tests ✓
-
-Test deletion flows end-to-end.
-
-- [x] Local file deletion: sync file, delete locally, sync, verify remote removal
-- [x] Remote file deletion: sync file, delete from another client, sync, verify local removal
-- [x] Local directory deletion: sync directory with files, delete locally, sync
-- [x] Remote directory deletion: sync directory, delete from another client, sync
-- [x] Edge case: delete file that was never synced (should just disappear)
-- [x] Edge case: delete file that's being modified remotely (conflict handling - remote wins, file restored)
-
-**Bugs Fixed During Testing**:
-1. **Spurious file deletion**: Files pushed in same sync were being marked for deletion because
-   they weren't yet in the remote directory document. Fixed by tracking `just_pushed_names` and
-   excluding them from deletion detection.
-
-2. **Remote deletion not propagating**: Files deleted on one client were being re-pushed by the
-   other. Fixed by adding snapshot check in local-only entry processing - if a file exists locally
-   and in snapshot but NOT in remote, it was deleted remotely (don't push it back).
-
-3. **Directory re-fetch on local deletion**: When a directory was deleted locally, the sync was
-   still spawning `SyncDirectory` task which re-fetched its contents. Fixed by checking for
-   local deletion (in snapshot but not locally) before spawning `SyncDirectory`.
-
-4. **Root directory cleanup spam**: The root directory entry ("") was matching the filter for
-   subdirectories and triggering spurious "Cleaning up: / (deleted)" messages. Fixed by explicitly
-   excluding empty path from directory deletion detection.
-
----
-
-### Phase 11 Completion Checklist
-
-- [x] Local file deletion detected and synced
-- [x] Remote file deletion detected and applied
-- [x] Directory deletion works in both directions
-- [x] Snapshot updated correctly after deletions
-- [x] Conflict case handled (delete vs modify - remote modification wins, file restored)
-- [x] All verification tests pass
-
-**Phase 11 complete. Proceed to Phase 12 (Integration Test Suite).**
-
----
-
-## Phase 12: Integration Test Suite
-
-**Goal**: Build automated integration tests to replace manual testing.
-
-**Deliverable**: `cargo test` runs integration tests that verify sync behavior.
+**Deliverable**: Rename a file locally, sync updates the name rather than delete+create.
 
 **Architecture Context**:
-We need a test harness that:
-1. Builds the thrustwork binary
-2. Starts a local sync server
-3. Creates isolated test directories
-4. Runs thrustwork commands and verifies results
-5. Cleans up after each test
+In `process_sync_directory`, we already detect both local deletions (in snapshot, not on disk)
+and local additions (on disk, not in snapshot/remote). Move detection identifies when these
+pairs represent the same file that was renamed. The key insight: a deleted file and a new file
+with similar content should be treated as a move, not delete+create.
+
+From pushwork: uses Sørensen–Dice coefficient with 70% similarity threshold.
 
 ---
 
-### Task 12.1: Research Sync Server Options
+### Task 13.1: Implement String Similarity
 
-Determine how to run a local sync server for testing.
+Add a function to compute Sørensen–Dice coefficient between two byte slices.
 
-- [ ] Check if automerge-repo-sync-server can run locally (npm package)
-- [ ] Check if there's a Rust-native sync server we can embed
-- [ ] Determine server startup/shutdown approach
+- [ ] Create `src/move_detector.rs` module
+- [ ] Implement `sorensen_dice_similarity(a: &[u8], b: &[u8]) -> f64`
+  - Returns 0.0 to 1.0 (1.0 = identical)
+  - Use bigrams (2-character sequences) for comparison
+  - Handle edge cases: empty strings, single characters
+- [ ] Add unit tests for similarity function
+
+**Algorithm**:
+```
+sorensen_dice(a, b) = 2 * |bigrams(a) ∩ bigrams(b)| / (|bigrams(a)| + |bigrams(b)|)
+```
+
+---
+
+### Task 13.2: Detect Move Candidates in Sync
+
+Modify `process_sync_directory` to identify potential moves before processing deletions.
+
+- [ ] Before processing deletions and new files, collect:
+  - `deleted_files`: Files in snapshot but not on disk (with their snapshot content/URL)
+  - `new_local_files`: Files on disk but not in snapshot or remote (with their content)
+- [ ] For each (deleted, new) pair, compute similarity
+- [ ] If similarity ≥ threshold (0.7), mark as move candidate
+- [ ] A file can only be in one move pair (highest similarity wins if ambiguous)
+
+**Note**: Content comparison requires reading file content. For binary files, compare raw bytes.
+For text files, compare the text content. Large files may need size-based pre-filtering.
+
+---
+
+### Task 13.3: Handle Move as Rename Operation
+
+When a move is detected, update the directory entry and file document instead of delete+create.
+
+- [ ] For detected moves, instead of spawning `DeleteRemoteFile` + `PushNewFile`:
+  - Update the directory entry's `name` field to the new name
+  - Update the file document's `name` field
+  - Update the snapshot to reflect the new path (same URL)
+- [ ] Add `SyncResult::Moved { old_path, new_path }` variant
+- [ ] Update `SyncSummary` to track moves
+
+---
+
+### Task 13.4: Update File Document Name
+
+Implement updating the `name` field in a file document for renames.
+
+- [ ] Add `update_file_name(handle, new_name)` to sync_ops.rs
+- [ ] Update the `name` field in the file document
+- [ ] Also update `extension` if it changed
+- [ ] Return new heads after the update
+
+---
+
+### Task 13.5: Handle Cross-Directory Moves
+
+Extend move detection to handle files moved between directories.
+
+- [ ] Move detection currently happens per-directory; cross-directory moves are
+  harder because the deleted and new file are in different `process_sync_directory` calls
+- [ ] Option A: Defer cross-directory moves to a future phase (simpler)
+- [ ] Option B: Collect all deletions and additions at the top level, then match (complex)
 - [ ] Document the chosen approach
 
----
-
-### Task 12.2: Test Infrastructure Setup
-
-Create the test harness framework.
-
-- [ ] Create `tests/integration/` directory structure
-- [ ] Implement test fixture that:
-  - Builds the binary (or uses pre-built)
-  - Starts sync server on a random port
-  - Creates temp directories for test clients
-  - Provides helper methods for running thrustwork commands
-  - Cleans up on drop
-- [ ] Implement basic assertion helpers
+**Decision needed**: Start with same-directory moves only (Option A), or implement full
+cross-directory move detection?
 
 ---
 
-### Task 12.3: Basic Sync Tests
+### Task 13.6: Configuration for Move Threshold
 
-Implement core sync scenario tests.
+Allow configuring the similarity threshold.
 
-- [ ] Test: init creates .pushwork directory and config
-- [ ] Test: push single file, clone to second client, verify content matches
-- [ ] Test: push multiple files, clone, verify all present
-- [ ] Test: push nested directory structure, clone, verify structure
-
----
-
-### Task 12.4: Modification Tests
-
-Test file modification scenarios.
-
-- [ ] Test: modify file on client A, sync both, verify B has changes
-- [ ] Test: modify file on client B, sync both, verify A has changes
-- [ ] Test: concurrent modifications, verify CRDT merge
+- [ ] Add `move_threshold` to config (default: 0.7)
+- [ ] Pass threshold to move detection logic
+- [ ] Allow disabling move detection with threshold of 0 or 1.0+
 
 ---
 
-### Task 12.5: Deletion Tests
+### Task 13.7: Integration Tests
 
-Test deletion scenarios (replaces manual testing from Phase 11).
+Add tests for move detection scenarios.
 
-- [ ] Test: delete file locally, sync, verify removed from clone
-- [ ] Test: delete file remotely (from B), sync A, verify deleted locally
-- [ ] Test: delete directory locally, sync, verify removed from clone
-- [ ] Test: delete directory remotely, sync, verify deleted locally
-
----
-
-### Task 12.6: Binary File Tests
-
-Test binary file handling.
-
-- [ ] Test: push binary file, clone, verify content matches
-- [ ] Test: modify binary file, sync, verify update
+- [ ] Test: rename file in place, sync, verify same document URL
+- [ ] Test: move file to subdirectory (if cross-directory supported), verify behavior
+- [ ] Test: rename with content changes, verify move still detected if similar enough
+- [ ] Test: two files with different content renamed, verify treated as separate delete+create
+- [ ] Test: threshold configuration affects detection
 
 ---
 
-### Task 12.7: Edge Case Tests
+### Phase 13 Completion Checklist
 
-Test error handling and edge cases.
+- [ ] Same-directory renames detected and synced as moves
+- [ ] Document URL preserved after rename
+- [ ] Directory entry updated (not deleted+recreated)
+- [ ] File document name field updated
+- [ ] Snapshot updated with new path, same URL
+- [ ] Integration tests pass
+- [ ] Cross-directory move handling documented (even if deferred)
 
-- [ ] Test: sync empty directory
-- [ ] Test: file with special characters in name
-- [ ] Test: large file (if practical)
-- [ ] Test: sync with no changes (idempotent)
-
----
-
-### Phase 12 Completion Checklist
-
-- [ ] Sync server runs locally for tests
-- [ ] Test harness creates isolated test environments
-- [ ] Basic sync tests pass
-- [ ] Modification tests pass
-- [ ] Deletion tests pass
-- [ ] Binary file tests pass
-- [ ] `cargo test` runs all tests successfully
-
-**Phase 12 complete when all tests pass reliably.**
+**Phase 13 complete when renames preserve document identity.**
 
 ---
 
