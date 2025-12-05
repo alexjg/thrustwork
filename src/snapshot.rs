@@ -285,6 +285,31 @@ impl Snapshot {
         self.directories.retain(|(_, entry)| entry.path != absolute_path);
         self.directories.len() < len_before
     }
+
+    /// Add an entry name to a directory's entries list
+    ///
+    /// This is used when a new file/folder is added to track which names
+    /// belong to which directory.
+    pub fn add_directory_entry(&mut self, dir_absolute_path: &Path, entry_name: String) {
+        for (_, entry) in &mut self.directories {
+            if entry.path == dir_absolute_path {
+                if !entry.entries.contains(&entry_name) {
+                    entry.entries.push(entry_name);
+                }
+                return;
+            }
+        }
+    }
+
+    /// Remove an entry name from a directory's entries list
+    pub fn remove_directory_entry(&mut self, dir_absolute_path: &Path, entry_name: &str) {
+        for (_, entry) in &mut self.directories {
+            if entry.path == dir_absolute_path {
+                entry.entries.retain(|n| n != entry_name);
+                return;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use tokio_tungstenite::connect_async;
 use crate::config::DirectoryConfig;
 use crate::init::PushworkPaths;
 use crate::snapshot::Snapshot;
-use crate::sync_tasks::{run_sync, SyncContext, SyncSummary};
+use crate::sync_tasks::{run_sync_two_phase, SyncContext, SyncSummary};
 
 // =============================================================================
 // Public API
@@ -50,8 +50,8 @@ pub async fn execute(paths: &PushworkPaths, config: &DirectoryConfig, repo: &Rep
 
     println!("Syncing directory: {:?}", paths.root);
 
-    // Run the parallel sync
-    let results = run_sync(&ctx).await;
+    // Run the two-phase sync (enables cross-directory move detection)
+    let results = run_sync_two_phase(&ctx).await;
 
     // Get the snapshot back and save it
     let snapshot = ctx.snapshot.lock().await;

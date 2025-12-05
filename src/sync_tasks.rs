@@ -17,12 +17,843 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use samod::{AutomergeUrl, ConnectionId, DocHandle, Repo};
 use tokio::sync::Mutex;
 
-use crate::documents::{DirectoryDocument, FileContent, FileDocument};
+use crate::documents::{DirectoryDocument, DirectoryEntry, FileContent, FileDocument};
 use crate::files::{self, FileInfo};
 use crate::move_detector::{self, DeletedFileCandidate, NewFileCandidate};
 use crate::scanner;
 use crate::snapshot::{Snapshot, SnapshotDirectoryEntry, SnapshotFileEntry};
 use crate::sync_ops;
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Parse directory entries from a DirectoryDocument into a Vec of (name, type, url) tuples.
+fn parse_directory_entries(dir_doc: &DirectoryDocument) -> Vec<(String, String, AutomergeUrl)> {
+    dir_doc
+        .docs
+        .iter()
+        .map(|e| {
+            (
+                e.name_str().to_string(),
+                e.entry_type_str().to_string(),
+                e.url_str().parse().expect("Invalid URL in directory entry"),
+            )
+        })
+        .collect()
+}
+
+// =============================================================================
+// Collection Phase Types (for two-phase sync with cross-directory moves)
+// =============================================================================
+
+/// Information about a file that was deleted locally (exists in snapshot+remote, not on disk)
+#[derive(Debug, Clone)]
+pub struct DeletedFileInfo {
+    /// Path relative to sync root (e.g., "src/foo.txt")
+    pub relative_path: PathBuf,
+    /// URL of the parent directory document
+    pub dir_url: AutomergeUrl,
+    /// URL of the file document
+    pub file_url: AutomergeUrl,
+    /// Snapshot entry for this file
+    pub snapshot_entry: SnapshotFileEntry,
+    /// Name of the file in the directory
+    pub name: String,
+}
+
+/// Information about a new local file (exists on disk, not in snapshot or remote)
+#[derive(Debug, Clone)]
+pub struct NewLocalFileInfo {
+    /// Path relative to sync root (e.g., "lib/foo.txt")
+    pub relative_path: PathBuf,
+    /// Absolute path on disk
+    pub absolute_path: PathBuf,
+    /// URL of the parent directory document
+    pub dir_url: AutomergeUrl,
+    /// Name of the file
+    pub name: String,
+}
+
+/// Information about a file that needs syncing (exists in all three: local, remote, snapshot)
+#[derive(Debug, Clone)]
+pub struct SyncFileInfo {
+    /// Path relative to sync root
+    pub relative_path: PathBuf,
+    /// URL of the file document
+    pub file_url: AutomergeUrl,
+    /// Snapshot entry for this file
+    pub snapshot_entry: SnapshotFileEntry,
+}
+
+/// Information about a new remote file (exists in remote, not locally or in snapshot)
+#[derive(Debug, Clone)]
+pub struct NewRemoteFileInfo {
+    /// Path relative to sync root
+    pub relative_path: PathBuf,
+    /// URL of the file document
+    pub file_url: AutomergeUrl,
+}
+
+/// Information about a file deleted remotely (in snapshot, not in remote)
+#[derive(Debug, Clone)]
+pub struct RemotelyDeletedFileInfo {
+    /// Path relative to sync root
+    pub relative_path: PathBuf,
+    /// Absolute path on disk
+    pub absolute_path: PathBuf,
+}
+
+/// Pending updates to a directory document
+#[derive(Debug, Clone)]
+pub struct DirectoryUpdate {
+    /// URL of the directory document
+    pub dir_url: AutomergeUrl,
+    /// Entries to add (name, type, url)
+    pub entries_to_add: Vec<(String, String, AutomergeUrl)>,
+    /// Entry names to remove
+    pub entries_to_remove: Vec<String>,
+    /// Snapshot update info
+    pub relative_path: PathBuf,
+    pub absolute_path: PathBuf,
+    pub all_entry_names: Vec<String>,
+}
+
+/// A detected cross-directory move
+#[derive(Debug, Clone)]
+pub struct CrossDirectoryMove {
+    /// Old path (e.g., "src/foo.txt")
+    pub old_path: PathBuf,
+    /// New path (e.g., "lib/foo.txt")
+    pub new_path: PathBuf,
+    /// The file document URL (preserved)
+    pub file_url: AutomergeUrl,
+    /// URL of the source directory (need to remove entry)
+    pub old_dir_url: AutomergeUrl,
+    /// URL of the destination directory (need to add entry)
+    pub new_dir_url: AutomergeUrl,
+    /// Old file name
+    pub old_name: String,
+    /// New file name
+    pub new_name: String,
+    /// Snapshot entry from the old location
+    pub snapshot_entry: SnapshotFileEntry,
+    /// Similarity score
+    pub similarity: f64,
+}
+
+/// All collected changes from scanning the directory tree
+#[derive(Debug, Default)]
+pub struct CollectedChanges {
+    /// Files deleted locally (candidates for move detection)
+    pub deleted_files: Vec<DeletedFileInfo>,
+    /// New local files (candidates for move detection)
+    pub new_local_files: Vec<NewLocalFileInfo>,
+    /// Files to sync (exist everywhere)
+    pub files_to_sync: Vec<SyncFileInfo>,
+    /// New remote files to fetch
+    pub new_remote_files: Vec<NewRemoteFileInfo>,
+    /// Files deleted remotely
+    pub remotely_deleted_files: Vec<RemotelyDeletedFileInfo>,
+    /// Directory updates to apply (keyed by directory URL string for merging)
+    pub directory_updates: std::collections::HashMap<String, DirectoryUpdate>,
+    /// New local directories to push
+    pub new_local_directories: Vec<(PathBuf, PathBuf, AutomergeUrl)>, // (relative, absolute, parent_dir_url)
+    /// New remote directories to fetch
+    pub new_remote_directories: Vec<(PathBuf, AutomergeUrl)>, // (relative, dir_url)
+    /// Directories deleted locally
+    pub deleted_local_directories: Vec<(PathBuf, AutomergeUrl, Vec<ChangeHash>)>, // (relative, url, snapshot_heads)
+    /// Directories deleted remotely
+    pub deleted_remote_directories: Vec<PathBuf>,
+}
+
+impl CollectedChanges {
+    /// Get or create a directory update entry
+    pub fn get_or_create_dir_update(&mut self, dir_url: &AutomergeUrl, relative_path: PathBuf, absolute_path: PathBuf) -> &mut DirectoryUpdate {
+        let key = dir_url.to_string();
+        self.directory_updates.entry(key).or_insert_with(|| DirectoryUpdate {
+            dir_url: dir_url.clone(),
+            relative_path,
+            absolute_path,
+            entries_to_add: Vec::new(),
+            entries_to_remove: Vec::new(),
+            all_entry_names: Vec::new(),
+        })
+    }
+}
+
+// =============================================================================
+// Two-Phase Sync Implementation
+// =============================================================================
+
+/// Scan a directory and collect changes without processing them.
+/// This is Phase 1 of the two-phase sync.
+async fn scan_directory_for_changes(
+    relative_path: PathBuf,
+    url: AutomergeUrl,
+    ctx: &SyncContext,
+    changes: &mut CollectedChanges,
+    subdirs_to_scan: &mut Vec<(PathBuf, AutomergeUrl)>,
+) -> Result<(), String> {
+    let path_str = relative_path.display().to_string();
+    let abs_path = ctx.absolute_path(&relative_path);
+
+    // Load directory document
+    let handle = match ctx.repo.find(url.doc_id().clone()).await {
+        Ok(Some(h)) => h,
+        Ok(None) => return Err(format!("Directory document not found: {}", path_str)),
+        Err(_) => return Err("Repo stopped".into()),
+    };
+
+    // Wait for remote changes
+    handle.we_have_their_changes(ctx.conn_id).await;
+
+    // Get directory entries from document (filtering out any invalid entries)
+    let remote_entries: Vec<(String, String, AutomergeUrl)> = handle.with_document(|doc| {
+        let dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
+        parse_directory_entries(&dir_doc)
+    });
+
+    // Get snapshot for this directory
+    let snapshot = ctx.snapshot.lock().await;
+    let snapshot_dir = snapshot.get_directory(&abs_path);
+    let snapshot_entries: HashSet<String> = snapshot_dir
+        .map(|d| d.entries.iter().cloned().collect())
+        .unwrap_or_default();
+    drop(snapshot);
+
+    // Get local filesystem entries
+    let local_entries: Vec<(String, PathBuf)> = match std::fs::read_dir(&abs_path) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| (e.file_name().to_string_lossy().to_string(), e.path()))
+            .filter(|(name, _)| !scanner::is_excluded(name, &ctx.exclude_patterns))
+            .collect(),
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Vec::new()
+            } else {
+                return Err(format!("Failed to read directory: {}", e));
+            }
+        }
+    };
+
+    let local_names: HashSet<String> = local_entries.iter().map(|(n, _)| n.clone()).collect();
+    let remote_names: HashSet<String> = remote_entries.iter().map(|(n, _, _)| n.clone()).collect();
+
+    // Initialize directory update for tracking entry names
+    // We need to use the key approach to avoid holding a mutable borrow while modifying other parts of changes
+    changes.get_or_create_dir_update(&url, relative_path.clone(), abs_path.clone());
+    let url_key = url.to_string();
+    if let Some(dir_update) = changes.directory_updates.get_mut(&url_key) {
+        dir_update.all_entry_names = remote_entries.iter().map(|(n, _, _)| n.clone()).collect();
+    }
+
+    // We'll collect entries to remove and add them to the directory update at the end
+    let mut entries_to_remove_from_dir: Vec<String> = Vec::new();
+
+    // Process remote entries
+    for (name, entry_type, entry_url) in &remote_entries {
+        let child_relative = if relative_path.as_os_str().is_empty() {
+            PathBuf::from(name)
+        } else {
+            relative_path.join(name)
+        };
+
+        let in_snapshot = snapshot_entries.contains(name);
+        let exists_locally = local_names.contains(name);
+
+        if entry_type == "folder" {
+            if in_snapshot && !exists_locally {
+                // Directory deleted locally - collect for later processing
+                let snapshot = ctx.snapshot.lock().await;
+                if let Some(dir_entry) = snapshot.get_directory(&ctx.absolute_path(&child_relative)) {
+                    changes.deleted_local_directories.push((
+                        child_relative,
+                        entry_url.clone(),
+                        dir_entry.head.clone(),
+                    ));
+                    // Mark for removal from parent directory document
+                    entries_to_remove_from_dir.push(name.clone());
+                }
+                drop(snapshot);
+            } else if exists_locally || in_snapshot {
+                // Known directory - queue for scanning
+                subdirs_to_scan.push((child_relative, entry_url.clone()));
+            } else {
+                // New remote directory
+                changes.new_remote_directories.push((child_relative, entry_url.clone()));
+            }
+        } else {
+            // It's a file
+            if in_snapshot && exists_locally {
+                // File exists everywhere - needs sync check
+                let child_abs = ctx.absolute_path(&child_relative);
+                let snapshot = ctx.snapshot.lock().await;
+                if let Some(file_entry) = snapshot.get_file(&child_abs) {
+                    changes.files_to_sync.push(SyncFileInfo {
+                        relative_path: child_relative,
+                        file_url: entry_url.clone(),
+                        snapshot_entry: file_entry.clone(),
+                    });
+                }
+                drop(snapshot);
+            } else if in_snapshot && !exists_locally {
+                // File deleted locally (candidate for move detection)
+                let child_abs = ctx.absolute_path(&child_relative);
+                let snapshot = ctx.snapshot.lock().await;
+                if let Some(file_entry) = snapshot.get_file(&child_abs) {
+                    changes.deleted_files.push(DeletedFileInfo {
+                        relative_path: child_relative,
+                        dir_url: url.clone(),
+                        file_url: entry_url.clone(),
+                        snapshot_entry: file_entry.clone(),
+                        name: name.clone(),
+                    });
+                    // Mark for removal from directory document
+                    entries_to_remove_from_dir.push(name.clone());
+                }
+                drop(snapshot);
+            } else if !in_snapshot && !exists_locally {
+                // New remote file
+                changes.new_remote_files.push(NewRemoteFileInfo {
+                    relative_path: child_relative,
+                    file_url: entry_url.clone(),
+                });
+            }
+            // Note: in_snapshot && exists_locally is handled above (files_to_sync)
+        }
+    }
+
+    // Process local-only entries
+    for (name, local_path) in &local_entries {
+        if !remote_names.contains(name) && !snapshot_entries.contains(name) {
+            // New local entry (not in remote, not in snapshot)
+            let child_relative = if relative_path.as_os_str().is_empty() {
+                PathBuf::from(name)
+            } else {
+                relative_path.join(name)
+            };
+
+            if local_path.is_dir() {
+                changes.new_local_directories.push((
+                    child_relative,
+                    local_path.clone(),
+                    url.clone(),
+                ));
+            } else if local_path.is_file() {
+                changes.new_local_files.push(NewLocalFileInfo {
+                    relative_path: child_relative,
+                    absolute_path: local_path.clone(),
+                    dir_url: url.clone(),
+                    name: name.clone(),
+                });
+            }
+        } else if !remote_names.contains(name) && snapshot_entries.contains(name) {
+            // File/dir in snapshot but not in remote = remotely deleted
+            let child_relative = if relative_path.as_os_str().is_empty() {
+                PathBuf::from(name)
+            } else {
+                relative_path.join(name)
+            };
+
+            if local_path.is_file() {
+                changes.remotely_deleted_files.push(RemotelyDeletedFileInfo {
+                    relative_path: child_relative,
+                    absolute_path: local_path.clone(),
+                });
+            } else if local_path.is_dir() {
+                changes.deleted_remote_directories.push(child_relative);
+            }
+        }
+    }
+
+    // Add collected entries_to_remove to the directory update
+    if !entries_to_remove_from_dir.is_empty() {
+        if let Some(dir_update) = changes.directory_updates.get_mut(&url_key) {
+            dir_update.entries_to_remove.extend(entries_to_remove_from_dir);
+        }
+    }
+
+    // Update snapshot with this directory's current state
+    // This ensures the directory entry exists for subsequent syncs
+    let dir_heads = sync_ops::get_document_heads(&handle);
+    let all_entry_names: Vec<String> = remote_entries.iter().map(|(n, _, _)| n.clone()).collect();
+    let mut snapshot = ctx.snapshot.lock().await;
+    snapshot.add_directory(
+        path_str,
+        SnapshotDirectoryEntry {
+            path: abs_path,
+            url: url.clone(),
+            head: dir_heads,
+            entries: all_entry_names,
+        },
+    );
+    drop(snapshot);
+
+    Ok(())
+}
+
+/// Detect cross-directory moves from collected changes.
+/// Returns detected moves and updates the changes struct to remove matched files.
+pub fn detect_cross_directory_moves(
+    changes: &mut CollectedChanges,
+    threshold: f64,
+    ctx: &SyncContext,
+) -> Vec<CrossDirectoryMove> {
+    if changes.deleted_files.is_empty() || changes.new_local_files.is_empty() || threshold >= 1.0 {
+        return Vec::new();
+    }
+
+    // Build candidates for move detection
+    // We need to read file contents for comparison
+    let mut deleted_with_content: Vec<(usize, DeletedFileCandidate)> = Vec::new();
+    let mut new_with_content: Vec<(usize, NewFileCandidate)> = Vec::new();
+
+    // For deleted files, we'll need to load content from the document later
+    // For now, collect indices and read content synchronously for new files
+    for (idx, new_file) in changes.new_local_files.iter().enumerate() {
+        if let Ok(content) = std::fs::read(&new_file.absolute_path) {
+            new_with_content.push((idx, NewFileCandidate {
+                name: new_file.name.clone(),
+                content,
+            }));
+        }
+    }
+
+    // Return empty if we couldn't read any new files
+    if new_with_content.is_empty() {
+        return Vec::new();
+    }
+
+    // For deleted files, we need the snapshot content
+    // Since we can't easily get remote content here synchronously,
+    // we'll use the snapshot path to try to get size hints
+    // The actual content comparison will happen in the async phase
+
+    // For now, return empty - we'll need to make this async
+    // or pre-load deleted file content during scanning
+    Vec::new()
+}
+
+/// Run two-phase sync: scan all directories, detect moves, then process changes
+pub async fn run_sync_two_phase(ctx: &SyncContext) -> Vec<SyncResult> {
+    // Phase 1: Scan all directories and collect changes
+    let mut changes = CollectedChanges::default();
+    let mut dirs_to_scan = vec![(PathBuf::new(), ctx.root_url.clone())];
+    let mut scan_errors: Vec<SyncResult> = Vec::new();
+
+    while let Some((relative_path, url)) = dirs_to_scan.pop() {
+        let mut subdirs = Vec::new();
+        match scan_directory_for_changes(relative_path, url, ctx, &mut changes, &mut subdirs).await {
+            Ok(()) => {
+                dirs_to_scan.extend(subdirs);
+            }
+            Err(e) => {
+                scan_errors.push(SyncResult::Error {
+                    path: "scan".into(),
+                    message: e,
+                });
+            }
+        }
+    }
+
+    // Phase 2: Detect cross-directory moves
+    let moves = detect_cross_directory_moves_async(&mut changes, ctx).await;
+
+    // Phase 3: Process all changes
+    let mut results = scan_errors;
+
+    // Process moves first
+    for mv in moves {
+        match process_cross_directory_move(&mv, ctx).await {
+            Ok(result) => results.push(result),
+            Err(e) => results.push(SyncResult::Error {
+                path: mv.old_path.display().to_string(),
+                message: e,
+            }),
+        }
+    }
+
+    // Process remaining changes using the task queue
+    let remaining_tasks = build_tasks_from_changes(&changes, ctx).await;
+
+    // Run remaining tasks in parallel
+    let mut tasks: FuturesUnordered<_> = FuturesUnordered::new();
+    for task in remaining_tasks {
+        tasks.push(process_task(task, ctx));
+    }
+
+    while let Some(output) = tasks.next().await {
+        results.extend(output.results);
+        for task in output.new_tasks {
+            tasks.push(process_task(task, ctx));
+        }
+    }
+
+    // Apply directory updates
+    for (_, dir_update) in changes.directory_updates {
+        if let Err(e) = apply_directory_update(&dir_update, ctx).await {
+            results.push(SyncResult::Error {
+                path: dir_update.relative_path.display().to_string(),
+                message: e,
+            });
+        }
+    }
+
+    results
+}
+
+/// Detect cross-directory moves asynchronously (can load file content from documents)
+async fn detect_cross_directory_moves_async(
+    changes: &mut CollectedChanges,
+    ctx: &SyncContext,
+) -> Vec<CrossDirectoryMove> {
+    if changes.deleted_files.is_empty() || changes.new_local_files.is_empty() || ctx.move_threshold >= 1.0 {
+        return Vec::new();
+    }
+
+    // Load content for deleted files from their documents
+    let mut deleted_with_content: Vec<(usize, Vec<u8>)> = Vec::new();
+    for (idx, deleted) in changes.deleted_files.iter().enumerate() {
+        if let Ok(Some(handle)) = ctx.repo.find(deleted.file_url.doc_id().clone()).await {
+            handle.we_have_their_changes(ctx.conn_id).await;
+            let content = handle.with_document(|doc| {
+                let file_doc: FileDocument = hydrate(doc).ok()?;
+                Some(file_doc.content_bytes().to_vec())
+            });
+            if let Some(content) = content {
+                deleted_with_content.push((idx, content));
+            }
+        }
+    }
+
+    // Load content for new files from disk
+    let mut new_with_content: Vec<(usize, Vec<u8>)> = Vec::new();
+    for (idx, new_file) in changes.new_local_files.iter().enumerate() {
+        if let Ok(content) = std::fs::read(&new_file.absolute_path) {
+            new_with_content.push((idx, content));
+        }
+    }
+
+    if deleted_with_content.is_empty() || new_with_content.is_empty() {
+        return Vec::new();
+    }
+
+    // Build candidates for move detection
+    let deleted_candidates: Vec<DeletedFileCandidate> = deleted_with_content
+        .iter()
+        .map(|(idx, content)| DeletedFileCandidate {
+            name: changes.deleted_files[*idx].name.clone(),
+            content: content.clone(),
+        })
+        .collect();
+
+    let new_candidates: Vec<NewFileCandidate> = new_with_content
+        .iter()
+        .map(|(idx, content)| NewFileCandidate {
+            name: changes.new_local_files[*idx].name.clone(),
+            content: content.clone(),
+        })
+        .collect();
+
+    // Run move detection
+    let detected = move_detector::detect_moves(&deleted_candidates, &new_candidates, ctx.move_threshold);
+
+    // Build CrossDirectoryMove structs and track which files were matched
+    let mut moves = Vec::new();
+    let mut matched_deleted_indices: HashSet<usize> = HashSet::new();
+    let mut matched_new_indices: HashSet<usize> = HashSet::new();
+
+    for detected_move in detected {
+        // Find the original indices
+        let deleted_idx = deleted_with_content
+            .iter()
+            .position(|(idx, _)| changes.deleted_files[*idx].name == detected_move.old_name);
+        let new_idx = new_with_content
+            .iter()
+            .position(|(idx, _)| changes.new_local_files[*idx].name == detected_move.new_name);
+
+        if let (Some(del_pos), Some(new_pos)) = (deleted_idx, new_idx) {
+            let del_orig_idx = deleted_with_content[del_pos].0;
+            let new_orig_idx = new_with_content[new_pos].0;
+
+            let deleted_info = &changes.deleted_files[del_orig_idx];
+            let new_info = &changes.new_local_files[new_orig_idx];
+
+            moves.push(CrossDirectoryMove {
+                old_path: deleted_info.relative_path.clone(),
+                new_path: new_info.relative_path.clone(),
+                file_url: deleted_info.file_url.clone(),
+                old_dir_url: deleted_info.dir_url.clone(),
+                new_dir_url: new_info.dir_url.clone(),
+                old_name: deleted_info.name.clone(),
+                new_name: new_info.name.clone(),
+                snapshot_entry: deleted_info.snapshot_entry.clone(),
+                similarity: detected_move.similarity,
+            });
+
+            matched_deleted_indices.insert(del_orig_idx);
+            matched_new_indices.insert(new_orig_idx);
+        }
+    }
+
+    // Remove matched files from changes (they'll be handled as moves)
+    // We need to remove in reverse order to preserve indices
+    let mut deleted_to_remove: Vec<usize> = matched_deleted_indices.into_iter().collect();
+    deleted_to_remove.sort_by(|a, b| b.cmp(a)); // Descending
+    for idx in deleted_to_remove {
+        changes.deleted_files.remove(idx);
+    }
+
+    let mut new_to_remove: Vec<usize> = matched_new_indices.into_iter().collect();
+    new_to_remove.sort_by(|a, b| b.cmp(a)); // Descending
+    for idx in new_to_remove {
+        changes.new_local_files.remove(idx);
+    }
+
+    moves
+}
+
+/// Process a cross-directory move
+async fn process_cross_directory_move(
+    mv: &CrossDirectoryMove,
+    ctx: &SyncContext,
+) -> Result<SyncResult, String> {
+    println!(
+        "  Moving: {} -> {} (similarity: {:.0}%)",
+        mv.old_path.display(),
+        mv.new_path.display(),
+        mv.similarity * 100.0
+    );
+
+    // Get file handle
+    let handle = ctx
+        .repo
+        .find(mv.file_url.doc_id().clone())
+        .await
+        .map_err(|_| "Repo stopped")?
+        .ok_or("File document not found")?;
+
+    // Update file document name
+    let new_extension = mv.new_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let new_heads = sync_ops::update_file_name(&handle, &mv.new_name, &new_extension)
+        .map_err(|e| format!("Failed to update file name: {}", e))?;
+
+    handle.they_have_our_changes(ctx.conn_id).await;
+
+    // Update old directory (remove entry)
+    if let Ok(Some(old_dir_handle)) = ctx.repo.find(mv.old_dir_url.doc_id().clone()).await {
+        old_dir_handle.we_have_their_changes(ctx.conn_id).await;
+        old_dir_handle.with_document(|doc| {
+            let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
+            dir_doc.docs.retain(|e| e.name_str() != mv.old_name);
+            doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+                autosurgeon::reconcile(txn, &dir_doc).expect("Failed to reconcile directory");
+                Ok(())
+            })
+            .expect("Transaction failed");
+        });
+        old_dir_handle.they_have_our_changes(ctx.conn_id).await;
+    }
+
+    // Update new directory (add entry)
+    if let Ok(Some(new_dir_handle)) = ctx.repo.find(mv.new_dir_url.doc_id().clone()).await {
+        new_dir_handle.we_have_their_changes(ctx.conn_id).await;
+        new_dir_handle.with_document(|doc| {
+            let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
+            dir_doc.docs.push(DirectoryEntry::file(
+                mv.new_name.clone(),
+                mv.file_url.to_string(),
+            ));
+            doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+                autosurgeon::reconcile(txn, &dir_doc).expect("Failed to reconcile directory");
+                Ok(())
+            })
+            .expect("Transaction failed");
+        });
+        new_dir_handle.they_have_our_changes(ctx.conn_id).await;
+    }
+
+    // Update snapshot
+    let new_abs_path = ctx.absolute_path(&mv.new_path);
+    let mut snapshot = ctx.snapshot.lock().await;
+    snapshot.remove_file(&mv.snapshot_entry.path);
+    snapshot.add_file(
+        mv.new_path.display().to_string(),
+        SnapshotFileEntry {
+            path: new_abs_path,
+            url: mv.file_url.clone(),
+            head: new_heads,
+            extension: new_extension,
+            mime_type: mv.snapshot_entry.mime_type.clone(),
+        },
+    );
+    drop(snapshot);
+
+    Ok(SyncResult::Moved {
+        old_path: mv.old_path.display().to_string(),
+        new_path: mv.new_path.display().to_string(),
+    })
+}
+
+/// Build tasks from collected changes (for changes that weren't moves)
+async fn build_tasks_from_changes(
+    changes: &CollectedChanges,
+    ctx: &SyncContext,
+) -> Vec<SyncTask> {
+    let mut tasks = Vec::new();
+
+    // Files to sync
+    for file_info in &changes.files_to_sync {
+        tasks.push(SyncTask::SyncFile {
+            relative_path: file_info.relative_path.clone(),
+            url: file_info.file_url.clone(),
+            snapshot_heads: file_info.snapshot_entry.head.clone(),
+            snapshot_entry: file_info.snapshot_entry.clone(),
+        });
+    }
+
+    // New remote files
+    for file_info in &changes.new_remote_files {
+        tasks.push(SyncTask::FetchNewFile {
+            relative_path: file_info.relative_path.clone(),
+            url: file_info.file_url.clone(),
+        });
+    }
+
+    // New local files (that weren't detected as moves)
+    for file_info in &changes.new_local_files {
+        tasks.push(SyncTask::PushNewFile {
+            relative_path: file_info.relative_path.clone(),
+            absolute_path: file_info.absolute_path.clone(),
+            parent_dir_url: file_info.dir_url.clone(),
+        });
+    }
+
+    // Deleted files (that weren't detected as moves)
+    for file_info in &changes.deleted_files {
+        tasks.push(SyncTask::DeleteRemoteFile {
+            relative_path: file_info.relative_path.clone(),
+            url: file_info.file_url.clone(),
+            snapshot_heads: file_info.snapshot_entry.head.clone(),
+        });
+    }
+
+    // Remotely deleted files
+    for file_info in &changes.remotely_deleted_files {
+        tasks.push(SyncTask::DeleteLocalFile {
+            relative_path: file_info.relative_path.clone(),
+            absolute_path: file_info.absolute_path.clone(),
+        });
+    }
+
+    // New remote directories
+    for (relative_path, url) in &changes.new_remote_directories {
+        tasks.push(SyncTask::FetchNewDirectory {
+            relative_path: relative_path.clone(),
+            url: url.clone(),
+        });
+    }
+
+    // New local directories
+    for (relative_path, absolute_path, parent_url) in &changes.new_local_directories {
+        tasks.push(SyncTask::PushNewDirectory {
+            relative_path: relative_path.clone(),
+            absolute_path: absolute_path.clone(),
+            parent_dir_url: parent_url.clone(),
+        });
+    }
+
+    // Deleted local directories
+    for (relative_path, url, _heads) in &changes.deleted_local_directories {
+        tasks.push(SyncTask::DeleteRemoteDirectory {
+            relative_path: relative_path.clone(),
+            absolute_path: ctx.absolute_path(relative_path),
+        });
+    }
+
+    // Remotely deleted directories
+    for relative_path in &changes.deleted_remote_directories {
+        tasks.push(SyncTask::DeleteLocalDirectory {
+            relative_path: relative_path.clone(),
+            absolute_path: ctx.absolute_path(relative_path),
+        });
+    }
+
+    tasks
+}
+
+/// Apply updates to a directory document
+async fn apply_directory_update(
+    update: &DirectoryUpdate,
+    ctx: &SyncContext,
+) -> Result<(), String> {
+    if update.entries_to_add.is_empty() && update.entries_to_remove.is_empty() {
+        return Ok(());
+    }
+
+    let handle = ctx
+        .repo
+        .find(update.dir_url.doc_id().clone())
+        .await
+        .map_err(|_| "Repo stopped")?
+        .ok_or("Directory document not found")?;
+
+    handle.we_have_their_changes(ctx.conn_id).await;
+
+    handle.with_document(|doc| {
+        let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
+
+        // Remove entries
+        let to_remove: HashSet<&str> = update.entries_to_remove.iter().map(|s| s.as_str()).collect();
+        dir_doc.docs.retain(|e| !to_remove.contains(e.name_str()));
+
+        // Add entries
+        for (name, entry_type, url) in &update.entries_to_add {
+            if entry_type == "folder" {
+                dir_doc.docs.push(DirectoryEntry::folder(name.clone(), url.to_string()));
+            } else {
+                dir_doc.docs.push(DirectoryEntry::file(name.clone(), url.to_string()));
+            }
+        }
+
+        doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+            autosurgeon::reconcile(txn, &dir_doc).expect("Failed to reconcile directory");
+            Ok(())
+        })
+        .expect("Transaction failed");
+    });
+
+    handle.they_have_our_changes(ctx.conn_id).await;
+
+    // Update snapshot
+    // Exclude removed entries and add new entries
+    let removed: HashSet<&str> = update.entries_to_remove.iter().map(|s| s.as_str()).collect();
+    let mut final_entries: Vec<String> = update.all_entry_names.iter()
+        .filter(|n| !removed.contains(n.as_str()))
+        .cloned()
+        .collect();
+    final_entries.extend(update.entries_to_add.iter().map(|(n, _, _)| n.clone()));
+
+    let dir_heads = sync_ops::get_document_heads(&handle);
+    let mut snapshot = ctx.snapshot.lock().await;
+    snapshot.add_directory(
+        update.relative_path.display().to_string(),
+        SnapshotDirectoryEntry {
+            path: update.absolute_path.clone(),
+            url: update.dir_url.clone(),
+            head: dir_heads,
+            entries: final_entries,
+        },
+    );
+
+    Ok(())
+}
 
 // =============================================================================
 // Sync Tasks
@@ -69,6 +900,8 @@ pub enum SyncTask {
         relative_path: PathBuf,
         /// Absolute path on disk
         absolute_path: PathBuf,
+        /// URL of the parent directory document
+        parent_dir_url: AutomergeUrl,
     },
 
     /// Fetch a new remote directory (exists on server, not locally)
@@ -85,6 +918,8 @@ pub enum SyncTask {
         relative_path: PathBuf,
         /// Absolute path on disk
         absolute_path: PathBuf,
+        /// URL of the parent directory document
+        parent_dir_url: AutomergeUrl,
     },
 
     /// Delete a file from the remote (file was deleted locally)
@@ -593,20 +1428,10 @@ async fn process_clone_directory(
     // Wait for remote changes
     handle.we_have_their_changes(ctx.conn_id).await;
 
-    // Get directory entries from document
+    // Get directory entries from document (filtering out any invalid entries)
     let entries: Vec<(String, String, AutomergeUrl)> = handle.with_document(|doc| {
         let dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
-        dir_doc
-            .docs
-            .iter()
-            .map(|e| {
-                (
-                    e.name_str().to_string(),
-                    e.entry_type_str().to_string(),
-                    e.url_str().parse().expect("Invalid URL in directory entry"),
-                )
-            })
-            .collect()
+        parse_directory_entries(&dir_doc)
     });
 
     // Spawn tasks for each entry
@@ -791,14 +1616,16 @@ pub async fn process_task(task: SyncTask, ctx: &SyncContext) -> TaskOutput {
         SyncTask::PushNewFile {
             relative_path,
             absolute_path,
-        } => process_push_new_file(relative_path, absolute_path, ctx).await,
+            parent_dir_url,
+        } => process_push_new_file(relative_path, absolute_path, parent_dir_url, ctx).await,
         SyncTask::FetchNewDirectory { relative_path, url } => {
             process_fetch_new_directory(relative_path, url, ctx).await
         }
         SyncTask::PushNewDirectory {
             relative_path,
             absolute_path,
-        } => process_push_new_directory(relative_path, absolute_path, ctx).await,
+            parent_dir_url,
+        } => process_push_new_directory(relative_path, absolute_path, parent_dir_url, ctx).await,
         SyncTask::DeleteRemoteFile {
             relative_path,
             url,
@@ -848,20 +1675,10 @@ async fn process_sync_directory(
     // Wait for remote changes
     handle.we_have_their_changes(ctx.conn_id).await;
 
-    // Get directory entries from document
+    // Get directory entries from document (filtering out any invalid entries)
     let remote_entries: Vec<(String, String, AutomergeUrl)> = handle.with_document(|doc| {
         let dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
-        dir_doc
-            .docs
-            .iter()
-            .map(|e| {
-                (
-                    e.name_str().to_string(),
-                    e.entry_type_str().to_string(),
-                    e.url_str().parse().expect("Invalid URL in directory entry"),
-                )
-            })
-            .collect()
+        parse_directory_entries(&dir_doc)
     });
 
     // Get snapshot for this directory
@@ -1664,13 +2481,18 @@ async fn process_fetch_new_file(
     TaskOutput::result(SyncResult::Pulled { path: path_str })
 }
 
-/// Process PushNewFile: create document and push to server
+/// Process PushNewFile: create document, update parent directory, and push to server
 async fn process_push_new_file(
     relative_path: PathBuf,
     absolute_path: PathBuf,
+    parent_dir_url: AutomergeUrl,
     ctx: &SyncContext,
 ) -> TaskOutput {
     let path_str = relative_path.display().to_string();
+    let file_name = relative_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     let file_info = FileInfo::from_path(&absolute_path);
     let file_type = if file_info.is_text { "text" } else { "binary" };
@@ -1688,11 +2510,48 @@ async fn process_push_new_file(
         }
     };
 
-    // Wait for sync
+    // Wait for file document to sync
     created.handle.they_have_our_changes(ctx.conn_id).await;
+
+    // Update parent directory document to include this file
+    let dir_handle = match ctx.repo.find(parent_dir_url.doc_id().clone()).await {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            return TaskOutput::result(SyncResult::Error {
+                path: path_str,
+                message: "Parent directory document not found".into(),
+            });
+        }
+        Err(_) => {
+            return TaskOutput::result(SyncResult::Error {
+                path: path_str,
+                message: "Repo stopped".into(),
+            });
+        }
+    };
+
+    // Add entry to directory document
+    dir_handle.with_document(|doc| {
+        let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
+        dir_doc.docs.push(crate::documents::DirectoryEntry::file(
+            file_name.clone(),
+            created.url.to_string(),
+        ));
+        doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+            autosurgeon::reconcile(txn, &dir_doc).expect("Failed to reconcile directory");
+            Ok(())
+        })
+        .expect("Transaction failed");
+    });
+
+    // Wait for directory update to sync
+    dir_handle.they_have_our_changes(ctx.conn_id).await;
 
     // Add to snapshot
     let heads = sync_ops::get_document_heads(&created.handle);
+    let parent_dir_path = relative_path.parent()
+        .map(|p| ctx.absolute_path(&p.to_path_buf()))
+        .unwrap_or_else(|| ctx.root_path.clone());
     let mut snapshot = ctx.snapshot.lock().await;
     snapshot.add_file(
         path_str.clone(),
@@ -1704,6 +2563,8 @@ async fn process_push_new_file(
             mime_type: file_info.mime_type,
         },
     );
+    // Also add this file name to the parent directory's entries
+    snapshot.add_directory_entry(&parent_dir_path, file_name.clone());
     drop(snapshot);
 
     // Return result with the handle and URL for parent directory update
@@ -1735,13 +2596,18 @@ async fn process_fetch_new_directory(
     process_sync_directory(relative_path, url, ctx).await
 }
 
-/// Process PushNewDirectory: create directory document and push contents
+/// Process PushNewDirectory: create directory document, update parent, and push contents
 async fn process_push_new_directory(
     relative_path: PathBuf,
     absolute_path: PathBuf,
+    parent_dir_url: AutomergeUrl,
     ctx: &SyncContext,
 ) -> TaskOutput {
     let path_str = relative_path.display().to_string();
+    let dir_name = relative_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     println!("  Creating directory: {}", path_str);
 
@@ -1755,6 +2621,43 @@ async fn process_push_new_directory(
             });
         }
     };
+
+    // Wait for directory document to sync
+    created.handle.they_have_our_changes(ctx.conn_id).await;
+
+    // Update parent directory document to include this directory
+    let parent_handle = match ctx.repo.find(parent_dir_url.doc_id().clone()).await {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            return TaskOutput::result(SyncResult::Error {
+                path: path_str,
+                message: "Parent directory document not found".into(),
+            });
+        }
+        Err(_) => {
+            return TaskOutput::result(SyncResult::Error {
+                path: path_str,
+                message: "Repo stopped".into(),
+            });
+        }
+    };
+
+    // Add entry to parent directory document
+    parent_handle.with_document(|doc| {
+        let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
+        dir_doc.docs.push(crate::documents::DirectoryEntry::folder(
+            dir_name.clone(),
+            created.url.to_string(),
+        ));
+        doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+            autosurgeon::reconcile(txn, &dir_doc).expect("Failed to reconcile directory");
+            Ok(())
+        })
+        .expect("Transaction failed");
+    });
+
+    // Wait for parent directory update to sync
+    parent_handle.they_have_our_changes(ctx.conn_id).await;
 
     // Scan local directory for contents
     let local_entries = match std::fs::read_dir(&absolute_path) {
@@ -1771,7 +2674,7 @@ async fn process_push_new_directory(
         }
     };
 
-    // Create tasks for contents
+    // Create tasks for contents - use the newly created directory as parent
     let mut new_tasks = Vec::new();
     for (name, local_path) in local_entries {
         let child_relative = relative_path.join(&name);
@@ -1780,20 +2683,22 @@ async fn process_push_new_directory(
             new_tasks.push(SyncTask::PushNewDirectory {
                 relative_path: child_relative,
                 absolute_path: local_path,
+                parent_dir_url: created.url.clone(),
             });
         } else if local_path.is_file() {
             new_tasks.push(SyncTask::PushNewFile {
                 relative_path: child_relative,
                 absolute_path: local_path,
+                parent_dir_url: created.url.clone(),
             });
         }
     }
 
-    // Wait for sync
-    created.handle.they_have_our_changes(ctx.conn_id).await;
-
     // Add to snapshot
     let heads = sync_ops::get_document_heads(&created.handle);
+    let parent_dir_path = relative_path.parent()
+        .map(|p| ctx.absolute_path(&p.to_path_buf()))
+        .unwrap_or_else(|| ctx.root_path.clone());
     let mut snapshot = ctx.snapshot.lock().await;
     snapshot.add_directory(
         path_str.clone(),
@@ -1804,6 +2709,8 @@ async fn process_push_new_directory(
             entries: Vec::new(), // Will be populated as child tasks complete
         },
     );
+    // Also add this directory name to the parent directory's entries
+    snapshot.add_directory_entry(&parent_dir_path, dir_name.clone());
     drop(snapshot);
 
     let mut output = TaskOutput::with_tasks(

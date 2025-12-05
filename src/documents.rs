@@ -253,9 +253,15 @@ impl FileDocument {
 
 /// An entry in a directory's `docs` array.
 /// All fields are collaborative Text in pushwork.
+///
+/// The `name` field is marked as `#[key]` so that autosurgeon can properly
+/// track directory entries during CRDT reconciliation. This enables correct
+/// merging when entries are added/removed concurrently by different clients.
 #[derive(Debug, Clone, Reconcile, Hydrate)]
 pub struct DirectoryEntry {
     /// Entry name (filename or subdirectory name) - collaborative Text
+    /// This is the key field for CRDT reconciliation of the docs array.
+    #[key]
     pub name: Text,
 
     /// Entry type: "file" or "folder" - collaborative Text

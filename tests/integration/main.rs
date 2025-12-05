@@ -430,3 +430,98 @@ async fn test_different_content_not_detected_as_move() {
     // Should NOT be detected as a move - URLs should be different
     assert_ne!(url_before, url_after, "Completely different content should not be detected as move");
 }
+
+/// Test: cross-directory move - file moved from root to subdirectory
+#[tokio::test]
+async fn test_cross_directory_move_to_subdir() {
+    let harness = TestHarness::new().await;
+
+    let client_a = harness.create_client("client-a").await;
+    client_a.init().await.unwrap();
+
+    // Create a file in root and a subdirectory
+    client_a.write_file("moveme.txt", "This file will be moved to a subdirectory").await;
+    client_a.create_dir("subdir").await;
+    client_a.sync().await.unwrap();
+
+    let url_before = client_a.get_file_url("moveme.txt").await
+        .expect("should have URL");
+
+    // Move file from root to subdirectory
+    client_a.rename_file("moveme.txt", "subdir/moveme.txt").await;
+    client_a.sync().await.unwrap();
+
+    // Should be detected as a cross-directory move - URL should be preserved
+    let url_after = client_a.get_file_url("subdir/moveme.txt").await
+        .expect("should have URL");
+
+    assert_eq!(url_before, url_after, "Cross-directory move should preserve document URL");
+    assert!(!client_a.file_exists("moveme.txt").await, "Original file should be gone");
+    assert!(client_a.file_exists("subdir/moveme.txt").await, "File should be in new location");
+}
+
+/// Test: cross-directory move - file moved from subdirectory to root
+#[tokio::test]
+async fn test_cross_directory_move_from_subdir() {
+    let harness = TestHarness::new().await;
+
+    let client_a = harness.create_client("client-a").await;
+    client_a.init().await.unwrap();
+
+    // Create a file in subdirectory
+    client_a.create_dir("subdir").await;
+    client_a.write_file("subdir/moveme.txt", "This file will be moved to root").await;
+    client_a.sync().await.unwrap();
+
+    let url_before = client_a.get_file_url("subdir/moveme.txt").await
+        .expect("should have URL");
+
+    // Move file from subdirectory to root
+    client_a.rename_file("subdir/moveme.txt", "moveme.txt").await;
+    client_a.sync().await.unwrap();
+
+    // Should be detected as a cross-directory move - URL should be preserved
+    let url_after = client_a.get_file_url("moveme.txt").await
+        .expect("should have URL");
+
+    assert_eq!(url_before, url_after, "Cross-directory move should preserve document URL");
+    assert!(!client_a.file_exists("subdir/moveme.txt").await, "Original file should be gone");
+    assert!(client_a.file_exists("moveme.txt").await, "File should be in new location");
+}
+
+/// Test: cross-directory move syncs to other client
+#[tokio::test]
+async fn test_cross_directory_move_syncs_to_other_client() {
+    let harness = TestHarness::new().await;
+
+    let client_a = harness.create_client("client-a").await;
+    client_a.init().await.unwrap();
+
+    // Create a file in root and a subdirectory
+    client_a.write_file("moveme.txt", "Content that will be moved cross-directory").await;
+    client_a.create_dir("target").await;
+    client_a.sync().await.unwrap();
+
+    // Clone to client B
+    let root_url = client_a.root_url().await.unwrap();
+    let client_b = harness.create_client("client-b").await;
+    client_b.clone(&root_url).await.unwrap();
+
+    // Verify B has the original file in root
+    assert!(client_b.file_exists("moveme.txt").await);
+    assert!(!client_b.file_exists("target/moveme.txt").await);
+
+    // A moves the file to subdirectory
+    client_a.rename_file("moveme.txt", "target/moveme.txt").await;
+    client_a.sync().await.unwrap();
+
+    // B syncs and should see the file in its new location
+    client_b.sync().await.unwrap();
+
+    assert!(!client_b.file_exists("moveme.txt").await, "File should be gone from root");
+    assert!(client_b.file_exists("target/moveme.txt").await, "File should be in target dir");
+    assert_eq!(
+        client_b.read_file("target/moveme.txt").await,
+        "Content that will be moved cross-directory"
+    );
+}

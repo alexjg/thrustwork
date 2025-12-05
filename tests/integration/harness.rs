@@ -249,6 +249,12 @@ impl TestClient {
         std::fs::remove_dir_all(&path).expect("failed to delete directory");
     }
 
+    /// Create a directory
+    pub async fn create_dir(&self, relative_path: &str) {
+        let path = self.path.join(relative_path);
+        std::fs::create_dir_all(&path).expect("failed to create directory");
+    }
+
     /// Rename/move a file
     pub async fn rename_file(&self, old_path: &str, new_path: &str) {
         let old = self.path.join(old_path);
