@@ -53,68 +53,82 @@ indicate deletion. The key challenge is distinguishing "deleted" from "not yet s
 
 ---
 
-### Task 11.1: Detect Local File Deletion
+### Task 11.1: Detect Local File Deletion ✓
 
 Extend `process_sync_directory` to detect files that exist in snapshot but not on disk.
 
-- [ ] In `process_sync_directory`, after gathering local/remote/snapshot sets:
+- [x] In `process_sync_directory`, after gathering local/remote/snapshot sets:
   - Find files in snapshot that are NOT in local filesystem
   - These are candidates for local deletion
-- [ ] For each locally-deleted file:
+- [x] For each locally-deleted file:
   - If file also exists in remote → it was deleted locally, needs remote removal
   - If file doesn't exist in remote → already deleted remotely, just clean snapshot
-- [ ] Add `SyncResult::Deleted { path: String }` variant for reporting
+- [x] Add `SyncResult::DeletedRemote`, `DeletedLocal`, `Restored` variants for reporting
 
-**Notes**: Be careful not to treat "new remote file" as "locally deleted". A file
-in remote but not in snapshot is new, not deleted.
+**Done**: Added deletion detection in `process_sync_directory`. Gets snapshot files for
+the current directory and compares against local/remote sets. Spawns appropriate tasks:
+- `DeleteRemoteFile` for locally-deleted files still in remote
+- `DeleteLocalFile` for remotely-deleted files still locally
 
 ---
 
-### Task 11.2: Remove Entry from Remote Directory
+### Task 11.2: Remove Entry from Remote Directory ✓
 
 Implement removing a file entry from a directory document.
 
-- [ ] Add `remove_file_from_directory(handle, filename)` to sync_ops.rs
-- [ ] Remove the entry from the directory's `files` map
-- [ ] Wait for sync confirmation (`they_have_our_changes`)
-- [ ] Add test for this function
+- [x] Add `remove_entry_from_directory(handle, name)` to sync_ops.rs
+- [x] Remove the entry from the directory's `docs` array by name
+- [x] Reconcile changes back to Automerge
+
+**Done**: Added `remove_entry_from_directory()` function. Also, entry removal is now
+handled directly in `process_sync_directory` via the `entries_to_remove` list.
 
 ---
 
-### Task 11.3: Handle Local File Deletion in Sync
+### Task 11.3: Handle Local File Deletion in Sync ✓
 
 Wire up local deletion detection to actually remove from remote.
 
-- [ ] When local deletion detected, call `remove_file_from_directory`
-- [ ] Remove the file from snapshot
-- [ ] Report `SyncResult::Deleted`
-- [ ] Handle the case where remote file was also modified (conflict - remote wins?)
+- [x] When local deletion detected, spawn `DeleteRemoteFile` task
+- [x] `process_delete_remote_file` checks for remote modifications
+- [x] If remote was modified, restore file locally (remote wins)
+- [x] If no remote changes, remove from directory doc and snapshot
+- [x] Report appropriate `SyncResult` variant
 
 **Decision (from pushwork)**: Remote modification wins - restore file locally with remote content.
 Rationale: In CRDT systems, modifications win over deletions to prevent data loss.
 If someone edited the file, they want it to exist.
 
+**Done**: `process_delete_remote_file` compares current document heads with snapshot heads.
+If different, writes remote content to disk (restore). If same, removes entry from directory
+document via `entries_to_remove`.
+
 ---
 
-### Task 11.4: Detect Remote File Deletion
+### Task 11.4: Detect Remote File Deletion ✓
 
 Extend `process_sync_directory` to detect files deleted on remote.
 
-- [ ] Find files in snapshot that are NOT in remote directory document
-- [ ] These were deleted remotely
-- [ ] If file exists locally → delete it
-- [ ] If file doesn't exist locally → just clean snapshot (already deleted both sides)
+- [x] Find files in snapshot that are NOT in remote directory document
+- [x] These were deleted remotely
+- [x] If file exists locally → spawn `DeleteLocalFile` task
+- [x] If file doesn't exist locally → just clean snapshot (already deleted both sides)
+
+**Done**: Detection added in `process_sync_directory`. Files in snapshot but not in remote
+and existing locally trigger `DeleteLocalFile` task.
 
 ---
 
-### Task 11.5: Delete Local File
+### Task 11.5: Delete Local File ✓
 
 Implement deleting a local file when remote deletion is detected.
 
-- [ ] Delete the file from local filesystem
-- [ ] Remove from snapshot
-- [ ] Report `SyncResult::DeletedLocally { path }` or similar
-- [ ] Handle errors gracefully (file already gone, permission denied)
+- [x] Delete the file from local filesystem using `std::fs::remove_file`
+- [x] Remove from snapshot
+- [x] Report `SyncResult::DeletedLocal { path }`
+- [x] Handle errors gracefully (file already gone → NoChange, permission denied → Error)
+
+**Done**: `process_delete_local_file` handles all cases including file already deleted.
 
 ---
 

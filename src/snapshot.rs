@@ -239,20 +239,20 @@ impl Snapshot {
         self.directories.push((relative_path, entry));
     }
 
-    /// Get a file entry by relative path
-    pub fn get_file(&self, relative_path: &str) -> Option<&SnapshotFileEntry> {
+    /// Get a file entry by absolute path
+    pub fn get_file(&self, absolute_path: &Path) -> Option<&SnapshotFileEntry> {
         self.files
             .iter()
-            .find(|(p, _)| p == relative_path)
+            .find(|(_, entry)| entry.path == absolute_path)
             .map(|(_, e)| e)
     }
 
     /// Update the heads for an existing file entry
     ///
     /// Returns true if the file was found and updated, false if not found.
-    pub fn update_file_heads(&mut self, relative_path: &str, new_heads: Vec<ChangeHash>) -> bool {
-        for (path, entry) in &mut self.files {
-            if path == relative_path {
+    pub fn update_file_heads(&mut self, absolute_path: &Path, new_heads: Vec<ChangeHash>) -> bool {
+        for (_, entry) in &mut self.files {
+            if entry.path == absolute_path {
                 entry.head = new_heads;
                 return true;
             }
@@ -260,12 +260,30 @@ impl Snapshot {
         false
     }
 
-    /// Get a directory entry by relative path
-    pub fn get_directory(&self, relative_path: &str) -> Option<&SnapshotDirectoryEntry> {
+    /// Get a directory entry by absolute path
+    pub fn get_directory(&self, absolute_path: &Path) -> Option<&SnapshotDirectoryEntry> {
         self.directories
             .iter()
-            .find(|(p, _)| p == relative_path)
+            .find(|(_, entry)| entry.path == absolute_path)
             .map(|(_, e)| e)
+    }
+
+    /// Remove a file entry from the snapshot by absolute path
+    ///
+    /// Returns true if the file was found and removed, false if not found.
+    pub fn remove_file(&mut self, absolute_path: &Path) -> bool {
+        let len_before = self.files.len();
+        self.files.retain(|(_, entry)| entry.path != absolute_path);
+        self.files.len() < len_before
+    }
+
+    /// Remove a directory entry from the snapshot by absolute path
+    ///
+    /// Returns true if the directory was found and removed, false if not found.
+    pub fn remove_directory(&mut self, absolute_path: &Path) -> bool {
+        let len_before = self.directories.len();
+        self.directories.retain(|(_, entry)| entry.path != absolute_path);
+        self.directories.len() < len_before
     }
 }
 
@@ -403,8 +421,8 @@ mod tests {
             },
         );
 
-        assert!(snapshot.get_file("a.txt").is_some());
-        assert!(snapshot.get_file("b.txt").is_none());
+        assert!(snapshot.get_file(Path::new("/tmp/test/a.txt")).is_some());
+        assert!(snapshot.get_file(Path::new("/tmp/test/b.txt")).is_none());
     }
 
     #[test]
@@ -440,7 +458,7 @@ mod tests {
         assert_eq!(snapshot.files.len(), 1);
         // URL changed to url_b - check head was updated (proves replacement occurred)
         assert_eq!(
-            snapshot.get_file("test.txt").unwrap().head,
+            snapshot.get_file(Path::new("/tmp/test/test.txt")).unwrap().head,
             vec![test_hash(HASH_B)]
         );
     }
@@ -474,11 +492,11 @@ mod tests {
         );
 
         // Update heads
-        let updated = snapshot.update_file_heads("test.txt", vec![test_hash(HASH_B)]);
+        let updated = snapshot.update_file_heads(Path::new("/tmp/test/test.txt"), vec![test_hash(HASH_B)]);
         assert!(updated);
 
         // Verify heads changed
-        let entry = snapshot.get_file("test.txt").unwrap();
+        let entry = snapshot.get_file(Path::new("/tmp/test/test.txt")).unwrap();
         assert_eq!(entry.head, vec![test_hash(HASH_B)]);
 
         // URL and other fields should be unchanged
@@ -491,7 +509,7 @@ mod tests {
         let mut snapshot = Snapshot::new(PathBuf::from("/tmp/test"), None);
 
         // Try to update a file that doesn't exist
-        let updated = snapshot.update_file_heads("nonexistent.txt", vec![test_hash(HASH_A)]);
+        let updated = snapshot.update_file_heads(Path::new("/tmp/test/nonexistent.txt"), vec![test_hash(HASH_A)]);
         assert!(!updated);
     }
 }

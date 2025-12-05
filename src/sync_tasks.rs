@@ -85,6 +85,24 @@ pub enum SyncTask {
         /// Absolute path on disk
         absolute_path: PathBuf,
     },
+
+    /// Delete a file from the remote (file was deleted locally)
+    DeleteRemoteFile {
+        /// Path relative to sync root
+        relative_path: PathBuf,
+        /// URL of the file document (to check for remote modifications)
+        url: AutomergeUrl,
+        /// Snapshot heads for this file (to detect remote changes)
+        snapshot_heads: Vec<ChangeHash>,
+    },
+
+    /// Delete a local file (file was deleted remotely)
+    DeleteLocalFile {
+        /// Path relative to sync root
+        relative_path: PathBuf,
+        /// Absolute path on disk
+        absolute_path: PathBuf,
+    },
 }
 
 impl SyncTask {
@@ -97,6 +115,8 @@ impl SyncTask {
             SyncTask::PushNewFile { relative_path, .. } => relative_path,
             SyncTask::FetchNewDirectory { relative_path, .. } => relative_path,
             SyncTask::PushNewDirectory { relative_path, .. } => relative_path,
+            SyncTask::DeleteRemoteFile { relative_path, .. } => relative_path,
+            SyncTask::DeleteLocalFile { relative_path, .. } => relative_path,
         }
     }
 
@@ -110,6 +130,8 @@ impl SyncTask {
             SyncTask::PushNewFile { .. } => format!("push new file: {}", path),
             SyncTask::FetchNewDirectory { .. } => format!("fetch new directory: {}", path),
             SyncTask::PushNewDirectory { .. } => format!("push new directory: {}", path),
+            SyncTask::DeleteRemoteFile { .. } => format!("delete remote file: {}", path),
+            SyncTask::DeleteLocalFile { .. } => format!("delete local file: {}", path),
         }
     }
 }
@@ -138,6 +160,15 @@ pub enum SyncResult {
     /// Created a new directory document
     CreatedDirectory { path: String },
 
+    /// Deleted a file remotely (was deleted locally)
+    DeletedRemote { path: String },
+
+    /// Deleted a file locally (was deleted remotely)
+    DeletedLocal { path: String },
+
+    /// File was deleted locally but modified remotely - restored it
+    Restored { path: String },
+
     /// No changes needed for this file
     NoChange { path: String },
 
@@ -159,6 +190,9 @@ impl SyncResult {
             SyncResult::Pulled { path } => path,
             SyncResult::Merged { path } => path,
             SyncResult::CreatedDirectory { path } => path,
+            SyncResult::DeletedRemote { path } => path,
+            SyncResult::DeletedLocal { path } => path,
+            SyncResult::Restored { path } => path,
             SyncResult::NoChange { path } => path,
             SyncResult::Error { path, .. } => path,
         }
@@ -236,6 +270,9 @@ pub struct SyncSummary {
     pub pulled: usize,
     pub merged: usize,
     pub created_directories: usize,
+    pub deleted_remote: usize,
+    pub deleted_local: usize,
+    pub restored: usize,
     pub errors: Vec<(String, String)>, // (path, message)
 }
 
@@ -251,6 +288,9 @@ impl SyncSummary {
                 SyncResult::Pulled { .. } => summary.pulled += 1,
                 SyncResult::Merged { .. } => summary.merged += 1,
                 SyncResult::CreatedDirectory { .. } => summary.created_directories += 1,
+                SyncResult::DeletedRemote { .. } => summary.deleted_remote += 1,
+                SyncResult::DeletedLocal { .. } => summary.deleted_local += 1,
+                SyncResult::Restored { .. } => summary.restored += 1,
                 SyncResult::NoChange { .. } => {}
                 SyncResult::Error { path, message } => {
                     summary.errors.push((path.clone(), message.clone()));
@@ -268,6 +308,9 @@ impl SyncSummary {
             || self.pulled > 0
             || self.merged > 0
             || self.created_directories > 0
+            || self.deleted_remote > 0
+            || self.deleted_local > 0
+            || self.restored > 0
     }
 
     /// Print the summary to stdout
@@ -302,6 +345,21 @@ impl SyncSummary {
 
         if self.created_directories > 0 {
             println!("Created {} directory(s).", self.created_directories);
+        }
+
+        if self.deleted_remote > 0 {
+            println!("Deleted {} file(s) remotely.", self.deleted_remote);
+        }
+
+        if self.deleted_local > 0 {
+            println!("Deleted {} file(s) locally.", self.deleted_local);
+        }
+
+        if self.restored > 0 {
+            println!(
+                "Restored {} file(s) (deleted locally but modified remotely).",
+                self.restored
+            );
         }
 
         for (path, message) in &self.errors {
@@ -704,6 +762,15 @@ pub async fn process_task(task: SyncTask, ctx: &SyncContext) -> TaskOutput {
             relative_path,
             absolute_path,
         } => process_push_new_directory(relative_path, absolute_path, ctx).await,
+        SyncTask::DeleteRemoteFile {
+            relative_path,
+            url,
+            snapshot_heads,
+        } => process_delete_remote_file(relative_path, url, snapshot_heads, ctx).await,
+        SyncTask::DeleteLocalFile {
+            relative_path,
+            absolute_path,
+        } => process_delete_local_file(relative_path, absolute_path, ctx).await,
     }
 }
 
@@ -754,7 +821,7 @@ async fn process_sync_directory(
 
     // Get snapshot for this directory
     let snapshot = ctx.snapshot.lock().await;
-    let snapshot_dir = snapshot.get_directory(&path_str);
+    let snapshot_dir = snapshot.get_directory(&abs_path);
     let snapshot_entries: HashSet<String> = snapshot_dir
         .map(|d| d.entries.iter().cloned().collect())
         .unwrap_or_default();
@@ -815,8 +882,9 @@ async fn process_sync_directory(
             // It's a file
             if in_snapshot {
                 // Tracked file - sync it
+                let child_abs = ctx.absolute_path(&child_relative);
                 let snapshot = ctx.snapshot.lock().await;
-                if let Some(file_entry) = snapshot.get_file(&child_relative.display().to_string()) {
+                if let Some(file_entry) = snapshot.get_file(&child_abs) {
                     new_tasks.push(SyncTask::SyncFile {
                         relative_path: child_relative,
                         url: entry_url.clone(),
@@ -927,12 +995,74 @@ async fn process_sync_directory(
         }
     }
 
-    // Update this directory document with new entries
-    if !new_entries.is_empty() {
-        // Load current document and add entries
+    // Detect deletions: files in snapshot but not locally or not in remote
+    // We need to get snapshot file entries for this directory
+    let snapshot = ctx.snapshot.lock().await;
+    let snapshot_files: Vec<(String, SnapshotFileEntry)> = snapshot
+        .files
+        .iter()
+        .filter(|(path, _)| {
+            // Get the parent directory of this file
+            let file_path = PathBuf::from(path);
+            let parent = file_path.parent().map(|p| p.to_string_lossy().to_string());
+            parent.as_deref() == Some(&path_str)
+                || (path_str.is_empty() && !path.contains('/') && !path.contains('\\'))
+        })
+        .map(|(path, entry)| {
+            let name = PathBuf::from(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (name, entry.clone())
+        })
+        .collect();
+    drop(snapshot);
+
+    // Track entries to remove from directory document (local deletions)
+    let mut entries_to_remove: Vec<String> = Vec::new();
+
+    for (name, file_entry) in snapshot_files {
+        let exists_locally = local_names.contains(&name);
+        let exists_in_remote = remote_names.contains(&name);
+
+        let child_relative = if relative_path.as_os_str().is_empty() {
+            PathBuf::from(&name)
+        } else {
+            relative_path.join(&name)
+        };
+
+        if !exists_locally && exists_in_remote {
+            // File was deleted locally but exists remotely
+            // Spawn task to handle deletion (may need to check for remote modifications)
+            new_tasks.push(SyncTask::DeleteRemoteFile {
+                relative_path: child_relative,
+                url: file_entry.url.clone(),
+                snapshot_heads: file_entry.head.clone(),
+            });
+            entries_to_remove.push(name.clone());
+        } else if !exists_locally && !exists_in_remote {
+            // File was deleted both locally and remotely - just clean up snapshot
+            println!("  Cleaning up: {} (deleted)", child_relative.display());
+            let mut snapshot = ctx.snapshot.lock().await;
+            snapshot.remove_file(&file_entry.path);
+            drop(snapshot);
+        } else if exists_locally && !exists_in_remote {
+            // File exists locally but not in remote - this is a remote deletion
+            let abs_path = ctx.absolute_path(&child_relative);
+            new_tasks.push(SyncTask::DeleteLocalFile {
+                relative_path: child_relative,
+                absolute_path: abs_path,
+            });
+        }
+    }
+
+    // Update this directory document: add new entries and remove deleted entries
+    if !new_entries.is_empty() || !entries_to_remove.is_empty() {
+        // Load current document and modify entries
         handle.with_document(|doc| {
             let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
 
+            // Add new entries
             for (name, entry_type, entry_url) in &new_entries {
                 if entry_type == "folder" {
                     dir_doc
@@ -949,6 +1079,11 @@ async fn process_sync_directory(
                 }
             }
 
+            // Remove deleted entries
+            for name in &entries_to_remove {
+                dir_doc.docs.retain(|entry| entry.name_str() != name);
+            }
+
             doc.transact::<_, _, automerge::AutomergeError>(|txn| {
                 autosurgeon::reconcile(txn, &dir_doc).expect("Failed to reconcile directory");
                 Ok(())
@@ -962,7 +1097,11 @@ async fn process_sync_directory(
 
     // Update snapshot with current directory state
     let dir_heads = sync_ops::get_document_heads(&handle);
-    let mut all_entry_names: Vec<String> = remote_entries.iter().map(|(n, _, _)| n.clone()).collect();
+    let mut all_entry_names: Vec<String> = remote_entries
+        .iter()
+        .filter(|(n, _, _)| !entries_to_remove.contains(n))
+        .map(|(n, _, _)| n.clone())
+        .collect();
     all_entry_names.extend(new_entries.iter().map(|(n, _, _)| n.clone()));
 
     let mut snapshot = ctx.snapshot.lock().await;
@@ -1068,7 +1207,7 @@ async fn process_sync_file(
 
                 // Update snapshot
                 let mut snapshot = ctx.snapshot.lock().await;
-                snapshot.update_file_heads(&path_str, new_heads);
+                snapshot.update_file_heads(&abs_path, new_heads);
                 drop(snapshot);
 
                 SyncResult::Merged { path: path_str }
@@ -1098,7 +1237,7 @@ async fn process_sync_file(
 
                 // Update snapshot
                 let mut snapshot = ctx.snapshot.lock().await;
-                snapshot.update_file_heads(&path_str, new_heads);
+                snapshot.update_file_heads(&abs_path, new_heads);
                 drop(snapshot);
 
                 SyncResult::PushedModified { path: path_str }
@@ -1116,7 +1255,7 @@ async fn process_sync_file(
             Ok(()) => {
                 // Update snapshot
                 let mut snapshot = ctx.snapshot.lock().await;
-                snapshot.update_file_heads(&path_str, current_heads);
+                snapshot.update_file_heads(&abs_path, current_heads);
                 drop(snapshot);
 
                 SyncResult::Pulled { path: path_str }
@@ -1357,6 +1496,128 @@ async fn process_push_new_directory(
     );
     output.handles_to_sync.push(created.handle);
     output
+}
+
+/// Process DeleteRemoteFile: check for remote modifications, then remove from directory
+///
+/// If the file was modified remotely since our last sync, restore it locally instead
+/// of deleting (remote modification wins over local deletion).
+async fn process_delete_remote_file(
+    relative_path: PathBuf,
+    url: AutomergeUrl,
+    snapshot_heads: Vec<ChangeHash>,
+    ctx: &SyncContext,
+) -> TaskOutput {
+    let path_str = relative_path.display().to_string();
+    let abs_path = ctx.absolute_path(&relative_path);
+
+    // Load document to check for remote changes
+    let handle = match ctx.repo.find(url.doc_id().clone()).await {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            // Document not found - already deleted remotely, just clean snapshot
+            let mut snapshot = ctx.snapshot.lock().await;
+            snapshot.remove_file(&abs_path);
+            drop(snapshot);
+            return TaskOutput::result(SyncResult::NoChange { path: path_str });
+        }
+        Err(_) => {
+            return TaskOutput::result(SyncResult::Error {
+                path: path_str,
+                message: "Repo stopped".into(),
+            });
+        }
+    };
+
+    // Wait for remote changes
+    handle.we_have_their_changes(ctx.conn_id).await;
+
+    // Check if remote has changed since our snapshot
+    let current_heads = sync_ops::get_document_heads(&handle);
+    let has_remote_changes = current_heads != snapshot_heads;
+
+    if has_remote_changes {
+        // Remote was modified - restore the file locally (remote wins)
+        println!(
+            "  Restoring: {} (deleted locally but modified remotely)",
+            path_str
+        );
+
+        // Ensure parent directory exists
+        if let Some(parent) = abs_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return TaskOutput::result(SyncResult::Error {
+                    path: path_str,
+                    message: format!("Failed to create parent directory: {}", e),
+                });
+            }
+        }
+
+        // Write remote content to disk
+        if let Err(e) = sync_ops::write_remote_file_to_disk(&handle, &abs_path) {
+            return TaskOutput::result(SyncResult::Error {
+                path: path_str,
+                message: format!("Failed to restore file: {}", e),
+            });
+        }
+
+        // Update snapshot with current heads
+        let mut snapshot = ctx.snapshot.lock().await;
+        snapshot.update_file_heads(&abs_path, current_heads);
+        drop(snapshot);
+
+        TaskOutput::result(SyncResult::Restored { path: path_str })
+    } else {
+        // No remote changes - proceed with deletion
+        println!("  Deleting remotely: {}", path_str);
+
+        // Remove from snapshot
+        let mut snapshot = ctx.snapshot.lock().await;
+        snapshot.remove_file(&abs_path);
+        drop(snapshot);
+
+        // Note: We don't actually remove the entry from the directory document here.
+        // The parent directory's process_sync_directory will handle removing entries
+        // that are in `entries_to_remove` after processing all children.
+        // For now, this task just handles the snapshot cleanup and reporting.
+
+        TaskOutput::result(SyncResult::DeletedRemote { path: path_str })
+    }
+}
+
+/// Process DeleteLocalFile: delete local file that was deleted remotely
+async fn process_delete_local_file(
+    _relative_path: PathBuf,
+    absolute_path: PathBuf,
+    ctx: &SyncContext,
+) -> TaskOutput {
+    let path_str = absolute_path.display().to_string();
+
+    println!("  Deleting locally: {}", path_str);
+
+    // Delete the local file
+    match std::fs::remove_file(&absolute_path) {
+        Ok(()) => {
+            // Remove from snapshot
+            let mut snapshot = ctx.snapshot.lock().await;
+            snapshot.remove_file(&absolute_path);
+            drop(snapshot);
+
+            TaskOutput::result(SyncResult::DeletedLocal { path: path_str })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File already gone - just clean up snapshot
+            let mut snapshot = ctx.snapshot.lock().await;
+            snapshot.remove_file(&absolute_path);
+            drop(snapshot);
+
+            TaskOutput::result(SyncResult::NoChange { path: path_str })
+        }
+        Err(e) => TaskOutput::result(SyncResult::Error {
+            path: path_str,
+            message: format!("Failed to delete file: {}", e),
+        }),
+    }
 }
 
 #[cfg(test)]

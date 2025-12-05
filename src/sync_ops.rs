@@ -174,6 +174,35 @@ pub fn add_folder_to_directory(dir: &mut DirectoryDocument, name: String, url: &
         .push(DirectoryEntry::folder(name, url.to_string()));
 }
 
+/// Remove an entry (file or folder) from a directory document by name
+///
+/// Returns true if the entry was found and removed, false otherwise.
+pub fn remove_entry_from_directory(handle: &DocHandle, name: &str) -> Result<bool, SyncError> {
+    handle.with_document(|doc| {
+        // Hydrate the directory document
+        let mut dir: DirectoryDocument =
+            hydrate(doc).map_err(|e| SyncError::Hydrate(format!("{}", e)))?;
+
+        // Find and remove the entry with the given name
+        let len_before = dir.docs.len();
+        dir.docs.retain(|entry| entry.name_str() != name);
+        let removed = dir.docs.len() < len_before;
+
+        if removed {
+            // Reconcile back to Automerge
+            doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+                reconcile(txn, &dir).map_err(|e| {
+                    automerge::AutomergeError::InvalidObjId(format!("reconcile failed: {}", e))
+                })?;
+                Ok(())
+            })
+            .map_err(|e| SyncError::Reconcile(format!("{:?}", e)))?;
+        }
+
+        Ok(removed)
+    })
+}
+
 /// Update a directory document with new file entries
 ///
 /// This loads the directory document, adds the new file entries, and saves it back.

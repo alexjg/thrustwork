@@ -160,7 +160,7 @@ pub fn scan_for_changes(
 
     for file in all_files {
         // Check if file is in snapshot
-        if snapshot.get_file(&file.relative_path).is_none() {
+        if snapshot.get_file(&file.absolute_path).is_none() {
             new_files.push(file);
         }
         // TODO: Check for modifications by comparing heads
