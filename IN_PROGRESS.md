@@ -18,6 +18,13 @@ The overall design we are working on is described in DESIGN.md and the separate 
 - Organise functions in modules with entry points at the top and helper/leaf functions
   at the bottom. This makes it easy to understand the module by reading top-to-bottom.
 
+**Testing Philosophy**
+- Prefer integration tests over unit tests or manual testing
+- Integration tests verify actual sync behavior end-to-end with a real sync server
+- Add new integration tests in `tests/integration/main.rs` using the `TestHarness`
+- The harness provides `create_client()` to get isolated test directories with helper
+  methods like `init()`, `sync()`, `clone()`, `write_file()`, `read_file()`, etc.
+
 **Technical Decisions**
 - Using `autosurgeon` crate for mapping Rust structs to Automerge documents
   - Provides `Reconcile` (write) and `Hydrate` (read) derive macros

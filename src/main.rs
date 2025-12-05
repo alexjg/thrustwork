@@ -18,14 +18,26 @@ mod sync_tasks;
 
 use documents::{DirectoryDocument, DirectoryEntry, FileDocument};
 
-const SYNC_SERVER_URL: &str = "wss://sync3.automerge.org";
+const DEFAULT_SYNC_SERVER_URL: &str = "wss://sync3.automerge.org";
 
 #[derive(Parser)]
 #[command(name = "thrustwork")]
 #[command(about = "A Rust implementation of pushwork - sync files via Automerge")]
 struct Cli {
+    /// Sync server URL (defaults to wss://sync3.automerge.org)
+    #[arg(long, global = true)]
+    sync_server: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+impl Cli {
+    fn sync_server_url(&self) -> &str {
+        self.sync_server
+            .as_deref()
+            .unwrap_or(DEFAULT_SYNC_SERVER_URL)
+    }
 }
 
 #[derive(Subcommand)]
@@ -53,10 +65,10 @@ enum Commands {
 }
 
 /// Connect to the sync server and return the repo
-async fn connect_to_sync_server(repo: &Repo) {
-    println!("Connecting to sync server: {}", SYNC_SERVER_URL);
+async fn connect_to_sync_server(repo: &Repo, sync_server_url: &str) {
+    println!("Connecting to sync server: {}", sync_server_url);
 
-    let (ws_stream, _response) = match connect_async(SYNC_SERVER_URL).await {
+    let (ws_stream, _response) = match connect_async(sync_server_url).await {
         Ok(conn) => conn,
         Err(e) => {
             eprintln!("Failed to connect to sync server: {}", e);
@@ -233,6 +245,11 @@ async fn main() {
                     std::process::exit(1);
                 });
 
+            // Apply CLI sync server override if provided
+            if let Some(ref server) = cli.sync_server {
+                config.sync_server = Some(server.clone());
+            }
+
             // Create the root directory document and sync it
             println!("Creating root directory document...");
             let root_url = init::create_root_document(&paths, &mut config)
@@ -262,10 +279,15 @@ async fn main() {
             println!("Syncing directory: {:?}", paths.root);
 
             // Load the config
-            let config = config::DirectoryConfig::load(&paths.config_file).unwrap_or_else(|e| {
+            let mut config = config::DirectoryConfig::load(&paths.config_file).unwrap_or_else(|e| {
                 eprintln!("Failed to load config: {}", e);
                 std::process::exit(1);
             });
+
+            // Apply CLI sync server override if provided
+            if let Some(ref server) = cli.sync_server {
+                config.sync_server = Some(server.clone());
+            }
 
             // Initialize repo with filesystem storage
             let storage = TokioFilesystemStorage::new(&paths.automerge_dir);
@@ -280,23 +302,23 @@ async fn main() {
             println!("Repo initialized (peer ID: {})", repo.peer_id());
 
             // Connect to sync server
-            connect_to_sync_server(&repo).await;
+            connect_to_sync_server(&repo, cli.sync_server_url()).await;
 
             create_test(&repo).await;
             println!("\nDone!");
         }
-        Commands::ReadDir { url } => {
+        Commands::ReadDir { ref url } => {
             // Initialize a samod Repo with in-memory storage
             let repo = samod::Repo::build_tokio().load().await;
             println!("Repo initialized (peer ID: {})", repo.peer_id());
 
             // Connect to sync server
-            connect_to_sync_server(&repo).await;
+            connect_to_sync_server(&repo, cli.sync_server_url()).await;
 
             read_dir(&repo, &url).await;
             println!("\nDone!");
         }
-        Commands::Clone { url } => {
+        Commands::Clone { ref url } => {
             println!("Cloning from: {}", url);
 
             // Get the current working directory
@@ -314,19 +336,25 @@ async fn main() {
 
             // Create the .pushwork directory structure
             println!("Creating .pushwork directory...");
-            let (paths, _config) =
+            let (paths, mut config) =
                 init::create_directory_structure(&cwd, false).unwrap_or_else(|e| {
                     eprintln!("Failed to create directory structure: {}", e);
                     std::process::exit(1);
                 });
+
+            // Apply CLI sync server override if provided
+            if let Some(ref server) = cli.sync_server {
+                config.sync_server = Some(server.clone());
+            }
 
             // Initialize repo with filesystem storage
             let storage = TokioFilesystemStorage::new(&paths.automerge_dir);
             let repo = Repo::build_tokio().with_storage(storage).load().await;
 
             // Connect to sync server
-            println!("Connecting to sync server: {}", SYNC_SERVER_URL);
-            let (ws_stream, _response) = connect_async(SYNC_SERVER_URL).await.unwrap_or_else(|e| {
+            let sync_url = config.sync_server_url();
+            println!("Connecting to sync server: {}", sync_url);
+            let (ws_stream, _response) = connect_async(sync_url).await.unwrap_or_else(|e| {
                 eprintln!("Failed to connect to sync server: {}", e);
                 std::process::exit(1);
             });

@@ -17,6 +17,7 @@ pub const DEFAULT_MOVE_DETECTION_THRESHOLD: f64 = 0.7;
 
 /// Sync-related configuration options
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncConfig {
     /// Threshold for Sørensen–Dice coefficient when detecting moves/renames
     pub move_detection_threshold: f64,
@@ -34,6 +35,7 @@ impl Default for SyncConfig {
 ///
 /// This structure matches pushwork's DirectoryConfig for compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DirectoryConfig {
     /// URL of the root directory document (set after creation)
     #[serde(skip_serializing_if = "Option::is_none")]
