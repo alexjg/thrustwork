@@ -50,8 +50,22 @@ fn compile_patterns(patterns: &[String]) -> Vec<Pattern> {
         .collect()
 }
 
-/// Check if a path matches any of the exclude patterns
-fn is_excluded(path: &Path, root: &Path, patterns: &[Pattern]) -> bool {
+/// Check if a filename matches any of the exclude patterns (public API)
+///
+/// This is a simpler version that just checks a single filename against patterns.
+pub fn is_excluded(name: &str, patterns: &[String]) -> bool {
+    for pattern in patterns {
+        if let Ok(p) = Pattern::new(pattern) {
+            if p.matches(name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a path matches any of the exclude patterns (internal)
+fn is_path_excluded(path: &Path, root: &Path, patterns: &[Pattern]) -> bool {
     // Get the relative path from root
     let relative = match path.strip_prefix(root) {
         Ok(r) => r,
@@ -102,7 +116,7 @@ pub fn scan_directory(
         }
 
         // Skip excluded paths
-        if is_excluded(path, root, &patterns) {
+        if is_path_excluded(path, root, &patterns) {
             continue;
         }
 
@@ -179,14 +193,14 @@ mod tests {
         let patterns = compile_patterns(&[".git".to_string(), "node_modules".to_string()]);
         let root = Path::new("/project");
 
-        assert!(is_excluded(Path::new("/project/.git"), root, &patterns));
-        assert!(is_excluded(Path::new("/project/.git/config"), root, &patterns));
-        assert!(is_excluded(
+        assert!(is_path_excluded(Path::new("/project/.git"), root, &patterns));
+        assert!(is_path_excluded(Path::new("/project/.git/config"), root, &patterns));
+        assert!(is_path_excluded(
             Path::new("/project/node_modules/foo"),
             root,
             &patterns
         ));
-        assert!(!is_excluded(Path::new("/project/src/main.rs"), root, &patterns));
+        assert!(!is_path_excluded(Path::new("/project/src/main.rs"), root, &patterns));
     }
 
     #[test]
@@ -194,13 +208,13 @@ mod tests {
         let patterns = compile_patterns(&["*.tmp".to_string()]);
         let root = Path::new("/project");
 
-        assert!(is_excluded(Path::new("/project/file.tmp"), root, &patterns));
-        assert!(is_excluded(
+        assert!(is_path_excluded(Path::new("/project/file.tmp"), root, &patterns));
+        assert!(is_path_excluded(
             Path::new("/project/subdir/other.tmp"),
             root,
             &patterns
         ));
-        assert!(!is_excluded(Path::new("/project/file.txt"), root, &patterns));
+        assert!(!is_path_excluded(Path::new("/project/file.txt"), root, &patterns));
     }
 
     #[test]

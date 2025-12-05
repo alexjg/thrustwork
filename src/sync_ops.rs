@@ -49,6 +49,14 @@ pub struct CreatedFileDocument {
     pub name: String,
 }
 
+/// Result of creating a directory document
+pub struct CreatedDirectoryDocument {
+    /// The document handle
+    pub handle: DocHandle,
+    /// The automerge URL
+    pub url: AutomergeUrl,
+}
+
 /// Create an Automerge file document from a local file
 ///
 /// This reads the file content, detects its type, and creates an Automerge
@@ -121,12 +129,49 @@ pub async fn create_file_document(
     })
 }
 
+/// Create an empty directory document in the repo
+///
+/// Creates a new directory document with no entries. Use `update_directory_with_files`
+/// or `update_directory_with_entries` to add entries after creation.
+pub async fn create_directory_document(repo: &Repo) -> Result<CreatedDirectoryDocument, SyncError> {
+    // Create empty directory document
+    let dir_doc = DirectoryDocument::new();
+
+    // Create Automerge document
+    let mut doc = Automerge::new();
+    doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+        reconcile(txn, &dir_doc).map_err(|e| {
+            automerge::AutomergeError::InvalidObjId(format!("reconcile failed: {}", e))
+        })?;
+        Ok(())
+    })
+    .map_err(|e| SyncError::Document(format!("{:?}", e)))?;
+
+    // Create document in repo
+    let handle = repo
+        .create(doc)
+        .await
+        .map_err(|e| SyncError::CreateDocument(format!("{:?}", e)))?;
+
+    let url = handle.url();
+
+    Ok(CreatedDirectoryDocument { handle, url })
+}
+
 /// Add a file entry to a directory document
 ///
 /// This modifies the directory document to include a new file entry.
 pub fn add_file_to_directory(dir: &mut DirectoryDocument, name: String, url: &AutomergeUrl) {
     dir.docs
         .push(DirectoryEntry::file(name, url.to_string()));
+}
+
+/// Add a folder entry to a directory document
+///
+/// This modifies the directory document to include a new folder entry.
+pub fn add_folder_to_directory(dir: &mut DirectoryDocument, name: String, url: &AutomergeUrl) {
+    dir.docs
+        .push(DirectoryEntry::folder(name, url.to_string()));
 }
 
 /// Update a directory document with new file entries
@@ -462,6 +507,55 @@ mod tests {
         assert_eq!(entry.mime_type, "text/plain");
         assert!(!entry.head.is_empty()); // Should have at least one head
         assert!(entry.url.to_string().starts_with("automerge:"));
+    }
+
+    #[tokio::test]
+    async fn test_create_directory_document() {
+        let repo = Repo::build_tokio().load().await;
+
+        let created = create_directory_document(&repo).await.unwrap();
+
+        // Verify URL is valid
+        assert!(created.url.to_string().starts_with("automerge:"));
+
+        // Verify it's a proper directory document
+        let dir_doc: DirectoryDocument =
+            created.handle.with_document(|doc| hydrate(doc).unwrap());
+
+        assert_eq!(dir_doc.patchwork.doc_type_str(), "folder");
+        assert!(dir_doc.docs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_add_folder_to_directory() {
+        let repo = Repo::build_tokio().load().await;
+
+        // Create parent directory
+        let parent = create_directory_document(&repo).await.unwrap();
+
+        // Create child directory
+        let child = create_directory_document(&repo).await.unwrap();
+
+        // Add child as folder entry
+        parent.handle.with_document(|doc| {
+            let mut dir_doc: DirectoryDocument = hydrate(doc).unwrap();
+            add_folder_to_directory(&mut dir_doc, "subdir".to_string(), &child.url);
+
+            doc.transact::<_, _, automerge::AutomergeError>(|txn| {
+                reconcile(txn, &dir_doc).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+
+        // Verify the folder entry was added
+        let dir_doc: DirectoryDocument =
+            parent.handle.with_document(|doc| hydrate(doc).unwrap());
+
+        assert_eq!(dir_doc.docs.len(), 1);
+        assert_eq!(dir_doc.docs[0].name_str(), "subdir");
+        assert_eq!(dir_doc.docs[0].entry_type_str(), "folder");
+        assert_eq!(dir_doc.docs[0].url_str(), child.url.to_string());
     }
 
     #[tokio::test]

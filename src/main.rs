@@ -14,6 +14,7 @@ mod scanner;
 mod snapshot;
 mod sync;
 mod sync_ops;
+mod sync_tasks;
 
 use documents::{DirectoryDocument, DirectoryEntry, FileDocument};
 
@@ -348,8 +349,8 @@ async fn main() {
             match clone::execute_clone(&repo, &url, cwd, paths).await {
                 Ok(result) => {
                     println!("\nDone! {} file(s) cloned.", result.files_cloned);
-                    if result.files_skipped > 0 {
-                        println!("{} file(s) skipped due to errors.", result.files_skipped);
+                    if result.errors > 0 {
+                        println!("{} error(s) occurred.", result.errors);
                     }
                 }
                 Err(e) => {

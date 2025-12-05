@@ -1,15 +1,18 @@
 //! Clone command implementation for pulling remote directories.
+//!
+//! Uses the parallel task-based architecture for efficient fetching
+//! of nested directories and files.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use autosurgeon::hydrate;
-use samod::{AutomergeUrl, DocHandle, Repo};
+use samod::{AutomergeUrl, ConnDirection, Repo};
 use thiserror::Error;
+use tokio_tungstenite::connect_async;
 
 use crate::config::DirectoryConfig;
-use crate::documents::{DirectoryDocument, FileDocument};
 use crate::init::PushworkPaths;
-use crate::snapshot::{Snapshot, SnapshotFileEntry};
+use crate::snapshot::Snapshot;
+use crate::sync_tasks::{run_clone, SyncContext, SyncSummary};
 
 /// Errors that can occur during clone operations
 #[derive(Debug, Error)]
@@ -17,11 +20,8 @@ pub enum CloneError {
     #[error("Invalid URL: {0}")]
     InvalidUrl(String),
 
-    #[error("Root directory document not found")]
-    RootNotFound,
-
-    #[error("Failed to hydrate directory: {0}")]
-    HydrateDirectory(String),
+    #[error("Failed to connect to sync server: {0}")]
+    ConnectionFailed(String),
 
     #[error("Failed to save config: {0}")]
     SaveConfig(String),
@@ -36,7 +36,7 @@ pub enum CloneError {
 /// Result of cloning a directory
 pub struct CloneResult {
     pub files_cloned: usize,
-    pub files_skipped: usize,
+    pub errors: usize,
 }
 
 /// Execute the full clone operation
@@ -46,256 +46,92 @@ pub(crate) async fn execute_clone(
     cwd: PathBuf,
     paths: PushworkPaths,
 ) -> Result<CloneResult, CloneError> {
-    // Parse URL and load directory
+    // Parse URL
     let root_url = parse_automerge_url(url)?;
-    println!("Loading root directory...");
 
-    let (_dir_handle, dir) = load_directory(repo, &root_url).await?;
+    // Connect to sync server (use default URL from config)
+    let config = DirectoryConfig::load(&paths.config_file).unwrap_or_default();
+    let sync_url = config.sync_server_url();
 
-    println!("Directory loaded:");
-    println!("  Type: {}", dir.patchwork.doc_type_str());
-    println!("  Entries: {}", dir.docs.len());
+    println!("Connecting to sync server: {}", sync_url);
+    let conn_id = connect_to_server(repo, &sync_url).await?;
 
-    // Extract files to clone
-    let (files_to_clone, dirs_skipped) = extract_files_from_directory(&dir);
+    // Create empty snapshot
+    let snapshot = Snapshot::new(cwd.clone(), Some(root_url.clone()));
 
-    for file in &files_to_clone {
-        println!("  Found file: {}", file.name);
-    }
+    // Create sync context
+    let ctx = SyncContext::new(
+        repo.clone(),
+        conn_id,
+        cwd.clone(),
+        root_url.clone(),
+        config.exclude_patterns.clone(),
+        snapshot,
+    );
 
-    println!("\nFound {} file(s) to clone", files_to_clone.len());
-    if dirs_skipped > 0 {
-        println!("Skipped {} subdirectory(ies)", dirs_skipped);
-    }
+    println!("Cloning from: {}", url);
 
-    if files_to_clone.is_empty() {
-        return Ok(CloneResult {
-            files_cloned: 0,
-            files_skipped: 0,
-        });
-    }
+    // Run the parallel clone
+    let results = run_clone(&ctx).await;
 
-    // Load all file documents concurrently
-    println!("\nPulling files...");
-    let loaded_results = load_files_concurrently(repo, &files_to_clone).await;
+    // Get the snapshot and save it
+    let snapshot = ctx.snapshot.lock().await;
 
-    // Filter out failures
-    let loaded_files: Vec<LoadedFile> = loaded_results.into_iter().flatten().collect();
-    let files_skipped = files_to_clone.len() - loaded_files.len();
-
-    for file in &loaded_files {
-        println!("  Loaded: {} ({} bytes)", file.name, file.content.len());
-    }
-
-    if loaded_files.is_empty() {
-        return Ok(CloneResult {
-            files_cloned: 0,
-            files_skipped,
-        });
-    }
-
-    // Write files to disk
-    println!("\nWriting files to disk...");
-    let written_count = write_files_to_disk(&cwd, &loaded_files);
-
-    // Save config and snapshot
-    save_config_and_snapshot(&paths, &root_url, &cwd, &loaded_files)?;
-    println!("Config and snapshot saved.");
-
-    Ok(CloneResult {
-        files_cloned: written_count,
-        files_skipped,
-    })
-}
-
-/// Save config and snapshot after cloning
-fn save_config_and_snapshot(
-    paths: &PushworkPaths,
-    root_url: &AutomergeUrl,
-    cwd: &Path,
-    files: &[LoadedFile],
-) -> Result<(), CloneError> {
-    // Update config with root directory URL
+    // Save config with root directory URL
     let mut config = DirectoryConfig::load(&paths.config_file).unwrap_or_default();
     config.root_directory_url = Some(root_url.to_string());
     config
         .save(&paths.config_file)
         .map_err(|e| CloneError::SaveConfig(e.to_string()))?;
 
-    // Create snapshot with cloned files
-    let mut snapshot = Snapshot::new(cwd.to_path_buf(), Some(root_url.clone()));
-
-    for file in files {
-        let heads = file.handle.with_document(|doc| doc.get_heads());
-        let file_url = file.handle.url();
-
-        let entry = SnapshotFileEntry {
-            path: cwd.join(&file.name),
-            url: file_url,
-            head: heads,
-            extension: file.extension.clone(),
-            mime_type: file.mime_type.clone(),
-        };
-
-        snapshot.add_file(file.name.clone(), entry);
-    }
-
-    snapshot.update_timestamp();
+    // Save snapshot
+    let mut snapshot_to_save = snapshot.clone();
+    snapshot_to_save.update_timestamp();
     let snapshot_path = Snapshot::path_in(&paths.pushwork_dir);
-    snapshot
+    snapshot_to_save
         .save(&snapshot_path)
         .map_err(|e| CloneError::SaveSnapshot(e.to_string()))?;
 
-    Ok(())
-}
+    drop(snapshot);
 
-/// Write loaded files to the local filesystem
-///
-/// Returns the number of files successfully written.
-fn write_files_to_disk(cwd: &Path, files: &[LoadedFile]) -> usize {
-    let mut written = 0;
+    // Count results
+    let summary = SyncSummary::from_results(&results);
+    let files_cloned = summary.pulled;
+    let errors = summary.errors.len();
 
-    for file in files {
-        let file_path = cwd.join(&file.name);
-
-        // Check if file already exists
-        if file_path.exists() {
-            eprintln!("  Warning: '{}' already exists, skipping", file.name);
-            continue;
-        }
-
-        // Write content to file
-        if let Err(e) = std::fs::write(&file_path, &file.content) {
-            eprintln!("  Error writing '{}': {}", file.name, e);
-            continue;
-        }
-
-        // Set file permissions (Unix only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(file.permissions as u32);
-            if let Err(e) = std::fs::set_permissions(&file_path, perms) {
-                eprintln!(
-                    "  Warning: Failed to set permissions for '{}': {}",
-                    file.name, e
-                );
-            }
-        }
-
-        println!("  Wrote: {}", file.name);
-        written += 1;
+    println!("\nCloned {} file(s).", files_cloned);
+    if errors > 0 {
+        println!("{} error(s) occurred.", errors);
     }
 
-    written
-}
-
-/// Load multiple file documents concurrently
-async fn load_files_concurrently(repo: &Repo, files: &[FileToClone]) -> Vec<Option<LoadedFile>> {
-    let futures: Vec<_> = files
-        .iter()
-        .map(|file| load_single_file(repo, file))
-        .collect();
-
-    futures::future::join_all(futures).await
-}
-
-/// Load the root directory document and hydrate it
-async fn load_directory(
-    repo: &Repo,
-    url: &AutomergeUrl,
-) -> Result<(DocHandle, DirectoryDocument), CloneError> {
-    let handle = repo
-        .find(url.doc_id().clone())
-        .await
-        .expect("Repo stopped")
-        .ok_or(CloneError::RootNotFound)?;
-
-    let dir: DirectoryDocument = handle
-        .with_document(|doc| hydrate(doc))
-        .map_err(|e| CloneError::HydrateDirectory(e.to_string()))?;
-
-    Ok((handle, dir))
-}
-
-/// Extract files to clone from a directory document
-///
-/// Returns a list of files and the count of skipped directories.
-fn extract_files_from_directory(dir: &DirectoryDocument) -> (Vec<FileToClone>, usize) {
-    let mut files = Vec::new();
-    let mut skipped_dirs = 0;
-
-    for entry in &dir.docs {
-        let entry_type = entry.entry_type_str();
-        let name = entry.name_str().to_string();
-        let url_str = entry.url_str();
-
-        if entry_type == "file" {
-            match url_str.parse::<AutomergeUrl>() {
-                Ok(url) => files.push(FileToClone { name, url }),
-                Err(e) => {
-                    eprintln!("  Warning: Invalid file URL for '{}': {}", name, e);
-                }
-            }
-        } else if entry_type == "folder" {
-            println!(
-                "  Skipping directory: {} (subdirectories not yet supported)",
-                name
-            );
-            skipped_dirs += 1;
-        }
-    }
-
-    (files, skipped_dirs)
-}
-
-/// Load a single file document
-async fn load_single_file(repo: &Repo, file: &FileToClone) -> Option<LoadedFile> {
-    let handle = match repo.find(file.url.doc_id().clone()).await.expect("Repo stopped") {
-        Some(h) => h,
-        None => {
-            eprintln!("  Warning: File document not found for '{}'", file.name);
-            return None;
-        }
-    };
-
-    let file_doc: FileDocument = match handle.with_document(|doc| hydrate(doc)) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("  Warning: Failed to hydrate file '{}': {}", file.name, e);
-            return None;
-        }
-    };
-
-    Some(LoadedFile {
-        name: file.name.clone(),
-        content: file_doc.content_bytes().to_vec(),
-        permissions: file_doc.metadata.permissions,
-        extension: file_doc.extension_str().to_string(),
-        mime_type: file_doc.mime_type_str().to_string(),
-        handle,
+    Ok(CloneResult {
+        files_cloned,
+        errors,
     })
+}
+
+/// Connect to the sync server
+async fn connect_to_server(
+    repo: &Repo,
+    sync_url: &str,
+) -> Result<samod::ConnectionId, CloneError> {
+    let (ws_stream, _response) = connect_async(sync_url)
+        .await
+        .map_err(|e| CloneError::ConnectionFailed(e.to_string()))?;
+
+    let conn = repo
+        .connect_tungstenite(ws_stream, ConnDirection::Outgoing)
+        .map_err(|_| CloneError::ConnectionFailed("Repo stopped".into()))?;
+
+    conn.handshake_complete()
+        .await
+        .map_err(|_| CloneError::ConnectionFailed("Handshake failed".into()))?;
+
+    Ok(conn.id())
 }
 
 /// Parse an Automerge URL
 fn parse_automerge_url(url: &str) -> Result<AutomergeUrl, CloneError> {
     url.parse()
         .map_err(|e| CloneError::InvalidUrl(format!("{}", e)))
-}
-
-/// Information about a file to clone
-struct FileToClone {
-    name: String,
-    url: AutomergeUrl,
-}
-
-/// A file that has been loaded from the remote
-struct LoadedFile {
-    name: String,
-    /// Raw bytes - works for both text and binary files
-    content: Vec<u8>,
-    permissions: i64,
-    extension: String,
-    mime_type: String,
-    handle: DocHandle,
 }
