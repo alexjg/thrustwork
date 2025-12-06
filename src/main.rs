@@ -172,7 +172,7 @@ async fn read_dir(repo: &Repo, url: &str) {
     let automerge_url: AutomergeUrl = url.parse().expect("Invalid automerge URL");
 
     let dir_handle = repo
-        .find(automerge_url.doc_id().clone())
+        .find(automerge_url.document_id().clone())
         .await
         .expect("Repo stopped")
         .expect("Directory document not found");
@@ -199,7 +199,7 @@ async fn read_dir(repo: &Repo, url: &str) {
                 .parse()
                 .expect("Invalid file automerge URL");
 
-            if let Some(file_handle) = repo.find(file_url.doc_id().clone()).await.expect("Repo stopped") {
+            if let Some(file_handle) = repo.find(file_url.document_id().clone()).await.expect("Repo stopped") {
                 let file: FileDocument = file_handle.with_document(|doc| {
                     hydrate(doc).expect("Failed to hydrate file document")
                 });

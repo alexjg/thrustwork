@@ -61,7 +61,7 @@ pub async fn detect_modified_files(
         };
 
         // Load the document and get content at snapshot heads
-        let handle = match repo.find(entry.url.doc_id().clone()).await.expect("Repo stopped") {
+        let handle = match repo.find(entry.url.document_id().clone()).await.expect("Repo stopped") {
             Some(h) => h,
             None => continue,
         };
@@ -113,7 +113,7 @@ async fn check_single_file_remote(
 ) -> Option<RemotelyChangedFile> {
     // Load the document
     let handle = repo
-        .find(entry.url.doc_id().clone())
+        .find(entry.url.document_id().clone())
         .await
         .expect("Repo stopped")?;
 

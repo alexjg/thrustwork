@@ -199,7 +199,7 @@ async fn scan_directory_for_changes(
     let abs_path = ctx.absolute_path(&relative_path);
 
     // Load directory document
-    let handle = match ctx.repo.find(url.doc_id().clone()).await {
+    let handle = match ctx.repo.find(url.document_id().clone()).await {
         Ok(Some(h)) => h,
         Ok(None) => return Err(format!("Directory document not found: {}", path_str)),
         Err(_) => return Err("Repo stopped".into()),
@@ -516,7 +516,7 @@ async fn detect_cross_directory_moves_async(
     // Load content for deleted files from their documents
     let mut deleted_with_content: Vec<(usize, Vec<u8>)> = Vec::new();
     for (idx, deleted) in changes.deleted_files.iter().enumerate() {
-        if let Ok(Some(handle)) = ctx.repo.find(deleted.file_url.doc_id().clone()).await {
+        if let Ok(Some(handle)) = ctx.repo.find(deleted.file_url.document_id().clone()).await {
             handle.we_have_their_changes(ctx.conn_id).await;
             let content = handle.with_document(|doc| {
                 let file_doc: FileDocument = hydrate(doc).ok()?;
@@ -630,7 +630,7 @@ async fn process_cross_directory_move(
     // Get file handle
     let handle = ctx
         .repo
-        .find(mv.file_url.doc_id().clone())
+        .find(mv.file_url.document_id().clone())
         .await
         .map_err(|_| "Repo stopped")?
         .ok_or("File document not found")?;
@@ -647,7 +647,7 @@ async fn process_cross_directory_move(
     handle.they_have_our_changes(ctx.conn_id).await;
 
     // Update old directory (remove entry)
-    if let Ok(Some(old_dir_handle)) = ctx.repo.find(mv.old_dir_url.doc_id().clone()).await {
+    if let Ok(Some(old_dir_handle)) = ctx.repo.find(mv.old_dir_url.document_id().clone()).await {
         old_dir_handle.we_have_their_changes(ctx.conn_id).await;
         old_dir_handle.with_document(|doc| {
             let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
@@ -662,7 +662,7 @@ async fn process_cross_directory_move(
     }
 
     // Update new directory (add entry)
-    if let Ok(Some(new_dir_handle)) = ctx.repo.find(mv.new_dir_url.doc_id().clone()).await {
+    if let Ok(Some(new_dir_handle)) = ctx.repo.find(mv.new_dir_url.document_id().clone()).await {
         new_dir_handle.we_have_their_changes(ctx.conn_id).await;
         new_dir_handle.with_document(|doc| {
             let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
@@ -799,7 +799,7 @@ async fn apply_directory_update(
 
     let handle = ctx
         .repo
-        .find(update.dir_url.doc_id().clone())
+        .find(update.dir_url.document_id().clone())
         .await
         .map_err(|_| "Repo stopped")?
         .ok_or("Directory document not found")?;
@@ -1403,7 +1403,7 @@ async fn process_clone_directory(
     }
 
     // Load directory document
-    let handle = match ctx.repo.find(url.doc_id().clone()).await {
+    let handle = match ctx.repo.find(url.document_id().clone()).await {
         Ok(Some(h)) => h,
         Ok(None) => {
             return CloneTaskOutput {
@@ -1500,7 +1500,7 @@ async fn process_clone_file(
     let abs_path = ctx.absolute_path(&relative_path);
 
     // Load file document
-    let handle = match ctx.repo.find(url.doc_id().clone()).await {
+    let handle = match ctx.repo.find(url.document_id().clone()).await {
         Ok(Some(h)) => h,
         Ok(None) => {
             return CloneTaskOutput {
@@ -1656,7 +1656,7 @@ async fn process_sync_directory(
     let abs_path = ctx.absolute_path(&relative_path);
 
     // Load directory document
-    let handle = match ctx.repo.find(url.doc_id().clone()).await {
+    let handle = match ctx.repo.find(url.document_id().clone()).await {
         Ok(Some(h)) => h,
         Ok(None) => {
             return TaskOutput::result(SyncResult::Error {
@@ -1819,7 +1819,7 @@ async fn process_sync_directory(
         let mut deleted_for_detection: Vec<DeletedFileCandidate> = Vec::new();
         for (name, entry) in &deleted_candidates {
             // Get the content of the deleted file from the remote document
-            if let Ok(Some(file_handle)) = ctx.repo.find(entry.url.doc_id().clone()).await {
+            if let Ok(Some(file_handle)) = ctx.repo.find(entry.url.document_id().clone()).await {
                 file_handle.we_have_their_changes(ctx.conn_id).await;
                 let content = file_handle.with_document(|doc| {
                     let file_doc: FileDocument = hydrate(doc).ok()?;
@@ -1871,7 +1871,7 @@ async fn process_sync_directory(
                 );
 
                 // Get file handle and update the name
-                if let Ok(Some(file_handle)) = ctx.repo.find(entry.url.doc_id().clone()).await {
+                if let Ok(Some(file_handle)) = ctx.repo.find(entry.url.document_id().clone()).await {
                     // Get extension from new filename
                     let new_extension = PathBuf::from(new_name)
                         .extension()
@@ -2264,7 +2264,7 @@ async fn process_sync_file(
     let abs_path = ctx.absolute_path(&relative_path);
 
     // Load document
-    let handle = match ctx.repo.find(url.doc_id().clone()).await {
+    let handle = match ctx.repo.find(url.document_id().clone()).await {
         Ok(Some(h)) => h,
         Ok(None) => {
             return TaskOutput::result(SyncResult::Error {
@@ -2417,7 +2417,7 @@ async fn process_fetch_new_file(
     println!("  Fetching: {}", path_str);
 
     // Load document
-    let handle = match ctx.repo.find(url.doc_id().clone()).await {
+    let handle = match ctx.repo.find(url.document_id().clone()).await {
         Ok(Some(h)) => h,
         Ok(None) => {
             return TaskOutput::result(SyncResult::Error {
@@ -2514,7 +2514,7 @@ async fn process_push_new_file(
     created.handle.they_have_our_changes(ctx.conn_id).await;
 
     // Update parent directory document to include this file
-    let dir_handle = match ctx.repo.find(parent_dir_url.doc_id().clone()).await {
+    let dir_handle = match ctx.repo.find(parent_dir_url.document_id().clone()).await {
         Ok(Some(h)) => h,
         Ok(None) => {
             return TaskOutput::result(SyncResult::Error {
@@ -2626,7 +2626,7 @@ async fn process_push_new_directory(
     created.handle.they_have_our_changes(ctx.conn_id).await;
 
     // Update parent directory document to include this directory
-    let parent_handle = match ctx.repo.find(parent_dir_url.doc_id().clone()).await {
+    let parent_handle = match ctx.repo.find(parent_dir_url.document_id().clone()).await {
         Ok(Some(h)) => h,
         Ok(None) => {
             return TaskOutput::result(SyncResult::Error {
@@ -2735,7 +2735,7 @@ async fn process_delete_remote_file(
     let abs_path = ctx.absolute_path(&relative_path);
 
     // Load document to check for remote changes
-    let handle = match ctx.repo.find(url.doc_id().clone()).await {
+    let handle = match ctx.repo.find(url.document_id().clone()).await {
         Ok(Some(h)) => h,
         Ok(None) => {
             // Document not found - already deleted remotely, just clean snapshot

@@ -40,6 +40,7 @@ The overall design we are working on is described in DESIGN.md and the separate 
 - `permissions` is stored as `i64` (JavaScript number -> Automerge Int)
 - `lastSyncAt` may be absent, use `#[autosurgeon(missing = "Default::default")]`
 - Snapshot heads are base58check encoded (using `bs58` crate with check feature)
+- **All integers in Automerge are `i64`** - use `i64` not `u64` for fields like `lastSyncAt`
 
 **Autosurgeon Key Attribute** (discovered during Phase 14):
 - When reconciling `Vec<T>` where items have identity (like directory entries),

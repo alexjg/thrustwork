@@ -139,7 +139,9 @@ dependencies = [
 
 [[package]]
 name = "autosurgeon"
-version = "0.10.0"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87b6547a9a35fbf5e5b1305a56c42196ae2cfb456897f1cab97d4829f1096550"
 dependencies = [
  "automerge",
  "autosurgeon-derive",
@@ -149,7 +151,9 @@ dependencies = [
 
 [[package]]
 name = "autosurgeon-derive"
-version = "0.10.0"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f99b54090e5aca6915313efcf065f9873c9ca9d39c875cfc956f30523075d49f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1196,7 +1200,9 @@ dependencies = [
 
 [[package]]
 name = "samod"
-version = "0.5.1"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69a574f1a243b35be09891ae4d26145bdcd24ce9a6d010898c030c37c5d03f35"
 dependencies = [
  "async-channel",
  "automerge",
@@ -1215,7 +1221,9 @@ dependencies = [
 
 [[package]]
 name = "samod-core"
-version = "0.5.1"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a238bbf7eca8eb62dd686c08d104f94d2cd8962c187683ff0d44b58742752ce1"
 dependencies = [
  "automerge",
  "base64 0.21.7",

@@ -326,8 +326,9 @@ pub struct DirectoryDocument {
 
     /// Unix timestamp (ms) of last sync, if any.
     /// This field may be absent in pushwork documents, so we use missing = "Default::default"
+    /// Automerge stores integers as i64 (Int), not u64.
     #[autosurgeon(rename = "lastSyncAt", missing = "Default::default")]
-    pub last_sync_at: Option<u64>,
+    pub last_sync_at: Option<i64>,
 }
 
 impl DirectoryDocument {
