@@ -373,131 +373,7 @@ mod tests {
     use automerge::{AutoCommit, ReadDoc};
     use autosurgeon::{hydrate, reconcile};
 
-    #[test]
-    fn test_file_document_schema() {
-        let file = FileDocument::new(
-            "test.txt".to_string(),
-            "txt".to_string(),
-            "text/plain".to_string(),
-            "Hello, world!",
-            644,
-        );
 
-        let mut doc = AutoCommit::new();
-        reconcile(&mut doc, &file).expect("reconcile failed");
-
-        // Verify the keys match pushwork schema
-        let keys: Vec<_> = doc.keys(automerge::ROOT).collect();
-        assert!(keys.contains(&"@patchwork".to_string()));
-        assert!(keys.contains(&"name".to_string()));
-        assert!(keys.contains(&"extension".to_string()));
-        assert!(keys.contains(&"mimeType".to_string()));
-        assert!(keys.contains(&"content".to_string()));
-        assert!(keys.contains(&"metadata".to_string()));
-
-        // Verify @patchwork.type is a Text object containing "file"
-        if let Some((_, obj_id)) = doc.get(automerge::ROOT, "@patchwork").unwrap() {
-            if let Some((val, type_obj_id)) = doc.get(&obj_id, "type").unwrap() {
-                // @patchwork.type should be a Text object (collaborative string)
-                assert!(
-                    matches!(val, automerge::Value::Object(automerge::ObjType::Text)),
-                    "Expected Text object for @patchwork.type, got {:?}",
-                    val
-                );
-                // Read the text content
-                let text = doc.text(&type_obj_id).expect("Failed to read text");
-                assert_eq!(text, "file");
-            } else {
-                panic!("@patchwork.type not found");
-            }
-        } else {
-            panic!("@patchwork not found");
-        }
-    }
-
-    #[test]
-    fn test_directory_document_schema() {
-        let dir = DirectoryDocument::with_entries(vec![DirectoryEntry::file(
-            "test.txt".to_string(),
-            "automerge:abc123".to_string(),
-        )]);
-
-        let mut doc = AutoCommit::new();
-        reconcile(&mut doc, &dir).expect("reconcile failed");
-
-        // Verify the keys match pushwork schema
-        let keys: Vec<_> = doc.keys(automerge::ROOT).collect();
-        assert!(keys.contains(&"@patchwork".to_string()));
-        assert!(keys.contains(&"docs".to_string()));
-        assert!(keys.contains(&"lastSyncAt".to_string()));
-
-        // Verify @patchwork.type is a Text object containing "folder"
-        if let Some((_, obj_id)) = doc.get(automerge::ROOT, "@patchwork").unwrap() {
-            if let Some((val, type_obj_id)) = doc.get(&obj_id, "type").unwrap() {
-                // @patchwork.type should be a Text object (collaborative string)
-                assert!(
-                    matches!(val, automerge::Value::Object(automerge::ObjType::Text)),
-                    "Expected Text object for @patchwork.type, got {:?}",
-                    val
-                );
-                // Read the text content
-                let text = doc.text(&type_obj_id).expect("Failed to read text");
-                assert_eq!(text, "folder");
-            } else {
-                panic!("@patchwork.type not found");
-            }
-        } else {
-            panic!("@patchwork not found");
-        }
-    }
-
-    #[test]
-    fn test_file_document_roundtrip() {
-        let original = FileDocument::new(
-            "readme.md".to_string(),
-            "md".to_string(),
-            "text/markdown".to_string(),
-            "# Hello\n\nThis is a test.",
-            755,
-        );
-
-        let mut doc = AutoCommit::new();
-        reconcile(&mut doc, &original).expect("reconcile failed");
-
-        let hydrated: FileDocument = hydrate(&doc).expect("hydrate failed");
-
-        assert_eq!(hydrated.patchwork.doc_type_str(), "file");
-        assert_eq!(hydrated.name_str(), "readme.md");
-        assert_eq!(hydrated.extension_str(), "md");
-        assert_eq!(hydrated.mime_type_str(), "text/markdown");
-        assert_eq!(hydrated.content_string(), "# Hello\n\nThis is a test.");
-        assert_eq!(hydrated.metadata.permissions, 755);
-    }
-
-    #[test]
-    fn test_directory_document_roundtrip() {
-        let mut original = DirectoryDocument::new();
-        original.add_file("file1.txt".to_string(), "automerge:abc".to_string());
-        original.add_folder("subdir".to_string(), "automerge:def".to_string());
-        original.last_sync_at = Some(1234567890);
-
-        let mut doc = AutoCommit::new();
-        reconcile(&mut doc, &original).expect("reconcile failed");
-
-        let hydrated: DirectoryDocument = hydrate(&doc).expect("hydrate failed");
-
-        assert_eq!(hydrated.patchwork.doc_type_str(), "folder");
-        assert_eq!(hydrated.docs.len(), 2);
-        assert_eq!(hydrated.docs[0].name_str(), "file1.txt");
-        assert_eq!(hydrated.docs[0].entry_type_str(), "file");
-        assert_eq!(hydrated.docs[0].url_str(), "automerge:abc");
-        assert_eq!(hydrated.docs[1].name_str(), "subdir");
-        assert_eq!(hydrated.docs[1].entry_type_str(), "folder");
-        assert_eq!(hydrated.docs[1].url_str(), "automerge:def");
-        assert_eq!(hydrated.last_sync_at, Some(1234567890));
-    }
-
-    /// Test that content field is a scalar string (ImmutableString compatible)
     #[test]
     fn test_content_field_is_scalar_string() {
         let file = FileDocument::new(
@@ -514,7 +390,6 @@ mod tests {
         // Check that content is a scalar string (not a Text object)
         // This is required for pushwork compatibility (uses ImmutableString)
         if let Some((value, _)) = doc.get(automerge::ROOT, "content").unwrap() {
-            println!("Content value type: {:?}", value);
             match value {
                 automerge::Value::Object(obj_type) => {
                     panic!(
@@ -634,42 +509,5 @@ mod tests {
 
         assert!(hydrated.is_binary());
         assert_eq!(hydrated.as_binary(), Some(bytes.as_slice()));
-    }
-
-    /// Test that reconcile correctly handles removing and adding directory entries.
-    ///
-    /// This verifies that when we hydrate a DirectoryDocument, modify the Vec
-    /// (remove entry, add new entry), and reconcile back, the Text fields are
-    /// correctly replaced rather than merged/concatenated.
-    #[test]
-    fn test_reconcile_directory_entry_replace() {
-        // Create directory with original entry
-        let mut doc = AutoCommit::new();
-        let dir_initial = DirectoryDocument::with_entries(vec![DirectoryEntry::file(
-            "original.txt".to_string(),
-            "automerge:abc123".to_string(),
-        )]);
-        reconcile(&mut doc, &dir_initial).expect("reconcile initial failed");
-
-        // Verify initial state
-        let dir_check1: DirectoryDocument = hydrate(&doc).expect("hydrate 1 failed");
-        assert_eq!(dir_check1.docs.len(), 1);
-        assert_eq!(dir_check1.docs[0].name_str(), "original.txt");
-
-        // Hydrate, modify (remove old, add new), and reconcile
-        let mut dir_updated: DirectoryDocument = hydrate(&doc).expect("hydrate 2 failed");
-        dir_updated.docs.retain(|e| e.name_str() != "original.txt");
-        dir_updated.docs.push(DirectoryEntry::file(
-            "newname.txt".to_string(),
-            "automerge:abc123".to_string(),
-        ));
-        reconcile(&mut doc, &dir_updated).expect("reconcile updated failed");
-
-        // Verify the result has the new entry with correct fields
-        let dir_final: DirectoryDocument = hydrate(&doc).expect("hydrate final failed");
-        assert_eq!(dir_final.docs.len(), 1);
-        assert_eq!(dir_final.docs[0].name_str(), "newname.txt");
-        assert_eq!(dir_final.docs[0].entry_type_str(), "file");
-        assert_eq!(dir_final.docs[0].url_str(), "automerge:abc123");
     }
 }

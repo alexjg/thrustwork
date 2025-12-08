@@ -76,11 +76,6 @@ pub fn is_text_mime_type(mime_type: &str) -> bool {
     )
 }
 
-/// Read a text file's content from disk
-pub fn read_text_file(path: &Path) -> std::io::Result<String> {
-    std::fs::read_to_string(path)
-}
-
 /// Get Unix file permissions (mode) from a path
 #[cfg(unix)]
 pub fn get_file_permissions(path: &Path) -> std::io::Result<u32> {
@@ -171,15 +166,6 @@ mod tests {
         let info = FileInfo::from_path(&path);
 
         assert_eq!(info.extension, "");
-    }
-
-    #[test]
-    fn test_read_text_file() {
-        let temp_file = NamedTempFile::new().unwrap();
-        std::fs::write(temp_file.path(), "Hello, world!").unwrap();
-
-        let content = read_text_file(temp_file.path()).unwrap();
-        assert_eq!(content, "Hello, world!");
     }
 
     #[test]

@@ -10,9 +10,6 @@ use samod::AutomergeUrl;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// The snapshot file name
-const SNAPSHOT_FILENAME: &str = "snapshot.json";
-
 /// Serialize/deserialize Vec<ChangeHash> as Vec<String> (base58check-encoded)
 ///
 /// This matches the format used by automerge-repo in JavaScript (UrlHeads).
@@ -187,19 +184,14 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// Create a new empty snapshot
-    pub fn new(root_path: PathBuf, root_directory_url: Option<AutomergeUrl>) -> Self {
+    pub fn new<P: AsRef<Path>>(root_path: P, root_directory_url: Option<AutomergeUrl>) -> Self {
         Self {
             timestamp: 0,
-            root_path,
+            root_path: root_path.as_ref().to_path_buf(),
             root_directory_url,
             files: Vec::new(),
             directories: Vec::new(),
         }
-    }
-
-    /// Get the path to the snapshot file in a .pushwork directory
-    pub fn path_in(pushwork_dir: &Path) -> PathBuf {
-        pushwork_dir.join(SNAPSHOT_FILENAME)
     }
 
     /// Load snapshot from a file
@@ -282,7 +274,8 @@ impl Snapshot {
     /// Returns true if the directory was found and removed, false if not found.
     pub fn remove_directory(&mut self, absolute_path: &Path) -> bool {
         let len_before = self.directories.len();
-        self.directories.retain(|(_, entry)| entry.path != absolute_path);
+        self.directories
+            .retain(|(_, entry)| entry.path != absolute_path);
         self.directories.len() < len_before
     }
 
@@ -383,7 +376,10 @@ mod tests {
 
         // Verify base58check encoding in JSON (not hex)
         // The hash should be encoded as base58check, not hex
-        assert!(!json.contains(HASH_A), "JSON should NOT contain hex-encoded hash");
+        assert!(
+            !json.contains(HASH_A),
+            "JSON should NOT contain hex-encoded hash"
+        );
         // Heads should be present as base58check strings
         assert!(json.contains("head"), "JSON should contain head field");
 
@@ -483,7 +479,10 @@ mod tests {
         assert_eq!(snapshot.files.len(), 1);
         // URL changed to url_b - check head was updated (proves replacement occurred)
         assert_eq!(
-            snapshot.get_file(Path::new("/tmp/test/test.txt")).unwrap().head,
+            snapshot
+                .get_file(Path::new("/tmp/test/test.txt"))
+                .unwrap()
+                .head,
             vec![test_hash(HASH_B)]
         );
     }
@@ -517,7 +516,8 @@ mod tests {
         );
 
         // Update heads
-        let updated = snapshot.update_file_heads(Path::new("/tmp/test/test.txt"), vec![test_hash(HASH_B)]);
+        let updated =
+            snapshot.update_file_heads(Path::new("/tmp/test/test.txt"), vec![test_hash(HASH_B)]);
         assert!(updated);
 
         // Verify heads changed
@@ -534,7 +534,10 @@ mod tests {
         let mut snapshot = Snapshot::new(PathBuf::from("/tmp/test"), None);
 
         // Try to update a file that doesn't exist
-        let updated = snapshot.update_file_heads(Path::new("/tmp/test/nonexistent.txt"), vec![test_hash(HASH_A)]);
+        let updated = snapshot.update_file_heads(
+            Path::new("/tmp/test/nonexistent.txt"),
+            vec![test_hash(HASH_A)],
+        );
         assert!(!updated);
     }
 }

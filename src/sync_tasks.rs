@@ -17,6 +17,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use samod::{AutomergeUrl, ConnectionId, DocHandle, Repo};
 use tokio::sync::Mutex;
 
+use crate::config::Config;
 use crate::documents::{DirectoryDocument, DirectoryEntry, FileContent, FileDocument};
 use crate::files::{self, FileInfo};
 use crate::move_detector::{self, DeletedFileCandidate, NewFileCandidate};
@@ -169,16 +170,23 @@ pub struct CollectedChanges {
 
 impl CollectedChanges {
     /// Get or create a directory update entry
-    pub fn get_or_create_dir_update(&mut self, dir_url: &AutomergeUrl, relative_path: PathBuf, absolute_path: PathBuf) -> &mut DirectoryUpdate {
+    pub fn get_or_create_dir_update(
+        &mut self,
+        dir_url: &AutomergeUrl,
+        relative_path: PathBuf,
+        absolute_path: PathBuf,
+    ) -> &mut DirectoryUpdate {
         let key = dir_url.to_string();
-        self.directory_updates.entry(key).or_insert_with(|| DirectoryUpdate {
-            dir_url: dir_url.clone(),
-            relative_path,
-            absolute_path,
-            entries_to_add: Vec::new(),
-            entries_to_remove: Vec::new(),
-            all_entry_names: Vec::new(),
-        })
+        self.directory_updates
+            .entry(key)
+            .or_insert_with(|| DirectoryUpdate {
+                dir_url: dir_url.clone(),
+                relative_path,
+                absolute_path,
+                entries_to_add: Vec::new(),
+                entries_to_remove: Vec::new(),
+                all_entry_names: Vec::new(),
+            })
     }
 }
 
@@ -227,7 +235,7 @@ async fn scan_directory_for_changes(
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .map(|e| (e.file_name().to_string_lossy().to_string(), e.path()))
-            .filter(|(name, _)| !scanner::is_excluded(name, &ctx.exclude_patterns))
+            .filter(|(name, _)| !scanner::is_excluded(name, ctx.config.exclude_patterns()))
             .collect(),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -267,7 +275,8 @@ async fn scan_directory_for_changes(
             if in_snapshot && !exists_locally {
                 // Directory deleted locally - collect for later processing
                 let snapshot = ctx.snapshot.lock().await;
-                if let Some(dir_entry) = snapshot.get_directory(&ctx.absolute_path(&child_relative)) {
+                if let Some(dir_entry) = snapshot.get_directory(&ctx.absolute_path(&child_relative))
+                {
                     changes.deleted_local_directories.push((
                         child_relative,
                         entry_url.clone(),
@@ -282,7 +291,9 @@ async fn scan_directory_for_changes(
                 subdirs_to_scan.push((child_relative, entry_url.clone()));
             } else {
                 // New remote directory
-                changes.new_remote_directories.push((child_relative, entry_url.clone()));
+                changes
+                    .new_remote_directories
+                    .push((child_relative, entry_url.clone()));
             }
         } else {
             // It's a file
@@ -358,10 +369,12 @@ async fn scan_directory_for_changes(
             };
 
             if local_path.is_file() {
-                changes.remotely_deleted_files.push(RemotelyDeletedFileInfo {
-                    relative_path: child_relative,
-                    absolute_path: local_path.clone(),
-                });
+                changes
+                    .remotely_deleted_files
+                    .push(RemotelyDeletedFileInfo {
+                        relative_path: child_relative,
+                        absolute_path: local_path.clone(),
+                    });
             } else if local_path.is_dir() {
                 changes.deleted_remote_directories.push(child_relative);
             }
@@ -371,7 +384,9 @@ async fn scan_directory_for_changes(
     // Add collected entries_to_remove to the directory update
     if !entries_to_remove_from_dir.is_empty() {
         if let Some(dir_update) = changes.directory_updates.get_mut(&url_key) {
-            dir_update.entries_to_remove.extend(entries_to_remove_from_dir);
+            dir_update
+                .entries_to_remove
+                .extend(entries_to_remove_from_dir);
         }
     }
 
@@ -414,10 +429,13 @@ pub fn detect_cross_directory_moves(
     // For now, collect indices and read content synchronously for new files
     for (idx, new_file) in changes.new_local_files.iter().enumerate() {
         if let Ok(content) = std::fs::read(&new_file.absolute_path) {
-            new_with_content.push((idx, NewFileCandidate {
-                name: new_file.name.clone(),
-                content,
-            }));
+            new_with_content.push((
+                idx,
+                NewFileCandidate {
+                    name: new_file.name.clone(),
+                    content,
+                },
+            ));
         }
     }
 
@@ -440,12 +458,13 @@ pub fn detect_cross_directory_moves(
 pub async fn run_sync_two_phase(ctx: &SyncContext) -> Vec<SyncResult> {
     // Phase 1: Scan all directories and collect changes
     let mut changes = CollectedChanges::default();
-    let mut dirs_to_scan = vec![(PathBuf::new(), ctx.root_url.clone())];
+    let mut dirs_to_scan = vec![(PathBuf::new(), ctx.config.root_doc_url().clone())];
     let mut scan_errors: Vec<SyncResult> = Vec::new();
 
     while let Some((relative_path, url)) = dirs_to_scan.pop() {
         let mut subdirs = Vec::new();
-        match scan_directory_for_changes(relative_path, url, ctx, &mut changes, &mut subdirs).await {
+        match scan_directory_for_changes(relative_path, url, ctx, &mut changes, &mut subdirs).await
+        {
             Ok(()) => {
                 dirs_to_scan.extend(subdirs);
             }
@@ -509,7 +528,10 @@ async fn detect_cross_directory_moves_async(
     changes: &mut CollectedChanges,
     ctx: &SyncContext,
 ) -> Vec<CrossDirectoryMove> {
-    if changes.deleted_files.is_empty() || changes.new_local_files.is_empty() || ctx.move_threshold >= 1.0 {
+    if changes.deleted_files.is_empty()
+        || changes.new_local_files.is_empty()
+        || ctx.config.move_detection_threshold() >= 1.0
+    {
         return Vec::new();
     }
 
@@ -558,7 +580,11 @@ async fn detect_cross_directory_moves_async(
         .collect();
 
     // Run move detection
-    let detected = move_detector::detect_moves(&deleted_candidates, &new_candidates, ctx.move_threshold);
+    let detected = move_detector::detect_moves(
+        &deleted_candidates,
+        &new_candidates,
+        ctx.config.move_detection_threshold(),
+    );
 
     // Build CrossDirectoryMove structs and track which files were matched
     let mut moves = Vec::new();
@@ -636,7 +662,8 @@ async fn process_cross_directory_move(
         .ok_or("File document not found")?;
 
     // Update file document name
-    let new_extension = mv.new_path
+    let new_extension = mv
+        .new_path
         .extension()
         .map(|e| e.to_string_lossy().to_string())
         .unwrap_or_default();
@@ -702,10 +729,7 @@ async fn process_cross_directory_move(
 }
 
 /// Build tasks from collected changes (for changes that weren't moves)
-async fn build_tasks_from_changes(
-    changes: &CollectedChanges,
-    ctx: &SyncContext,
-) -> Vec<SyncTask> {
+async fn build_tasks_from_changes(changes: &CollectedChanges, ctx: &SyncContext) -> Vec<SyncTask> {
     let mut tasks = Vec::new();
 
     // Files to sync
@@ -770,7 +794,7 @@ async fn build_tasks_from_changes(
     }
 
     // Deleted local directories
-    for (relative_path, url, _heads) in &changes.deleted_local_directories {
+    for (relative_path, _url, _heads) in &changes.deleted_local_directories {
         tasks.push(SyncTask::DeleteRemoteDirectory {
             relative_path: relative_path.clone(),
             absolute_path: ctx.absolute_path(relative_path),
@@ -789,10 +813,7 @@ async fn build_tasks_from_changes(
 }
 
 /// Apply updates to a directory document
-async fn apply_directory_update(
-    update: &DirectoryUpdate,
-    ctx: &SyncContext,
-) -> Result<(), String> {
+async fn apply_directory_update(update: &DirectoryUpdate, ctx: &SyncContext) -> Result<(), String> {
     if update.entries_to_add.is_empty() && update.entries_to_remove.is_empty() {
         return Ok(());
     }
@@ -810,15 +831,23 @@ async fn apply_directory_update(
         let mut dir_doc: DirectoryDocument = hydrate(doc).expect("Failed to hydrate directory");
 
         // Remove entries
-        let to_remove: HashSet<&str> = update.entries_to_remove.iter().map(|s| s.as_str()).collect();
+        let to_remove: HashSet<&str> = update
+            .entries_to_remove
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         dir_doc.docs.retain(|e| !to_remove.contains(e.name_str()));
 
         // Add entries
         for (name, entry_type, url) in &update.entries_to_add {
             if entry_type == "folder" {
-                dir_doc.docs.push(DirectoryEntry::folder(name.clone(), url.to_string()));
+                dir_doc
+                    .docs
+                    .push(DirectoryEntry::folder(name.clone(), url.to_string()));
             } else {
-                dir_doc.docs.push(DirectoryEntry::file(name.clone(), url.to_string()));
+                dir_doc
+                    .docs
+                    .push(DirectoryEntry::file(name.clone(), url.to_string()));
             }
         }
 
@@ -833,8 +862,14 @@ async fn apply_directory_update(
 
     // Update snapshot
     // Exclude removed entries and add new entries
-    let removed: HashSet<&str> = update.entries_to_remove.iter().map(|s| s.as_str()).collect();
-    let mut final_entries: Vec<String> = update.all_entry_names.iter()
+    let removed: HashSet<&str> = update
+        .entries_to_remove
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    let mut final_entries: Vec<String> = update
+        .all_entry_names
+        .iter()
         .filter(|n| !removed.contains(n.as_str()))
         .cloned()
         .collect();
@@ -1069,56 +1104,36 @@ impl SyncResult {
 /// parallel tasks and Mutex for mutable state (snapshot).
 #[derive(Clone)]
 pub struct SyncContext {
+    /// The configuration of this pushwork repo
+    pub config: Config,
+
     /// The automerge repo
     pub repo: Repo,
 
     /// Connection ID for the sync server
     pub conn_id: ConnectionId,
 
-    /// Root path on the filesystem
-    pub root_path: PathBuf,
-
-    /// URL of the root directory document
-    pub root_url: AutomergeUrl,
-
-    /// Patterns to exclude from sync
-    pub exclude_patterns: Vec<String>,
-
     /// The snapshot (wrapped in mutex for concurrent updates)
     pub snapshot: Arc<Mutex<Snapshot>>,
-
-    /// Move detection threshold (0.0-1.0, default 0.7)
-    pub move_threshold: f64,
 }
 
 impl SyncContext {
     /// Create a new sync context
-    pub fn new(
-        repo: Repo,
-        conn_id: ConnectionId,
-        root_path: PathBuf,
-        root_url: AutomergeUrl,
-        exclude_patterns: Vec<String>,
-        snapshot: Snapshot,
-        move_threshold: f64,
-    ) -> Self {
+    pub fn new(config: Config, repo: Repo, conn_id: ConnectionId, snapshot: Snapshot) -> Self {
         Self {
+            config,
             repo,
             conn_id,
-            root_path,
-            root_url,
-            exclude_patterns,
             snapshot: Arc::new(Mutex::new(snapshot)),
-            move_threshold,
         }
     }
 
     /// Get the absolute path for a relative path
     pub fn absolute_path(&self, relative_path: &PathBuf) -> PathBuf {
         if relative_path.as_os_str().is_empty() {
-            self.root_path.clone()
+            self.config.root_dir().to_path_buf()
         } else {
-            self.root_path.join(relative_path)
+            self.config.root_dir().join(relative_path)
         }
     }
 }
@@ -1298,7 +1313,7 @@ pub async fn run_sync(ctx: &SyncContext) -> Vec<SyncResult> {
     // Start with the root directory
     let initial_task = SyncTask::SyncDirectory {
         relative_path: PathBuf::new(),
-        url: ctx.root_url.clone(),
+        url: ctx.config.root_doc_url().clone(),
     };
 
     tasks.push(process_task(initial_task, ctx));
@@ -1328,7 +1343,7 @@ pub async fn run_clone(ctx: &SyncContext) -> Vec<SyncResult> {
     // Start by fetching the root directory contents
     let initial_task = CloneTask::FetchDirectory {
         relative_path: PathBuf::new(),
-        url: ctx.root_url.clone(),
+        url: ctx.config.root_doc_url().clone(),
     };
 
     tasks.push(process_clone_task(initial_task, ctx));
@@ -1438,7 +1453,7 @@ async fn process_clone_directory(
     let mut new_tasks = Vec::new();
     for (name, entry_type, entry_url) in entries {
         // Skip excluded files
-        if scanner::is_excluded(&name, &ctx.exclude_patterns) {
+        if scanner::is_excluded(&name, ctx.config.exclude_patterns()) {
             continue;
         }
 
@@ -1694,7 +1709,7 @@ async fn process_sync_directory(
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .map(|e| (e.file_name().to_string_lossy().to_string(), e.path()))
-            .filter(|(name, _)| !scanner::is_excluded(name, &ctx.exclude_patterns))
+            .filter(|(name, _)| !scanner::is_excluded(name, ctx.config.exclude_patterns()))
             .collect::<Vec<_>>(),
         Err(e) => {
             // Directory might not exist locally (new remote directory)
@@ -1804,7 +1819,8 @@ async fn process_sync_directory(
     // Collect new file candidates (local files not in snapshot and not in remote)
     let mut new_file_candidates: Vec<(String, PathBuf)> = Vec::new();
     for (name, local_path) in &local_entries {
-        if local_path.is_file() && !remote_names.contains(name) && !snapshot_entries.contains(name) {
+        if local_path.is_file() && !remote_names.contains(name) && !snapshot_entries.contains(name)
+        {
             new_file_candidates.push((name.clone(), local_path.clone()));
         }
     }
@@ -1814,7 +1830,10 @@ async fn process_sync_directory(
     let mut renamed_entries: Vec<(String, String, AutomergeUrl)> = Vec::new(); // (old_name, new_name, url)
     let mut results = Vec::new();
 
-    if !deleted_candidates.is_empty() && !new_file_candidates.is_empty() && ctx.move_threshold < 1.0 {
+    if !deleted_candidates.is_empty()
+        && !new_file_candidates.is_empty()
+        && ctx.config.move_detection_threshold() < 1.0
+    {
         // Build candidates for move detection
         let mut deleted_for_detection: Vec<DeletedFileCandidate> = Vec::new();
         for (name, entry) in &deleted_candidates {
@@ -1848,7 +1867,7 @@ async fn process_sync_directory(
         let detected_moves = move_detector::detect_moves(
             &deleted_for_detection,
             &new_for_detection,
-            ctx.move_threshold,
+            ctx.config.move_detection_threshold(),
         );
 
         // Process detected moves
@@ -1871,7 +1890,8 @@ async fn process_sync_directory(
                 );
 
                 // Get file handle and update the name
-                if let Ok(Some(file_handle)) = ctx.repo.find(entry.url.document_id().clone()).await {
+                if let Ok(Some(file_handle)) = ctx.repo.find(entry.url.document_id().clone()).await
+                {
                     // Get extension from new filename
                     let new_extension = PathBuf::from(new_name)
                         .extension()
@@ -1885,7 +1905,11 @@ async fn process_sync_directory(
                             file_handle.they_have_our_changes(ctx.conn_id).await;
 
                             // Track this as a renamed entry (for directory update)
-                            renamed_entries.push((old_name.clone(), new_name.clone(), entry.url.clone()));
+                            renamed_entries.push((
+                                old_name.clone(),
+                                new_name.clone(),
+                                entry.url.clone(),
+                            ));
 
                             // Update snapshot: remove old path, add new path with same URL
                             let new_relative = if relative_path.as_os_str().is_empty() {
@@ -2040,7 +2064,10 @@ async fn process_sync_directory(
     // Detect deletions: files in snapshot but not locally or not in remote
     // We need to get snapshot file entries for this directory
     // IMPORTANT: Exclude files we just pushed in this sync (they're in snapshot but not yet in remote)
-    let just_pushed_names: HashSet<String> = new_entries.iter().map(|(name, _, _)| name.clone()).collect();
+    let just_pushed_names: HashSet<String> = new_entries
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect();
 
     let snapshot = ctx.snapshot.lock().await;
     let snapshot_files: Vec<(String, SnapshotFileEntry)> = snapshot
@@ -2170,8 +2197,10 @@ async fn process_sync_directory(
 
     // Update this directory document: add new entries, rename entries, and remove deleted entries
     // Note: For renames, we treat them as remove + add to avoid CRDT Text merging issues
-    let old_names_from_renames: HashSet<String> =
-        renamed_entries.iter().map(|(old, _, _)| old.clone()).collect();
+    let old_names_from_renames: HashSet<String> = renamed_entries
+        .iter()
+        .map(|(old, _, _)| old.clone())
+        .collect();
     let all_entries_to_remove: HashSet<String> = entries_to_remove
         .iter()
         .cloned()
@@ -2197,12 +2226,10 @@ async fn process_sync_directory(
             // Add new entries (new files + renamed files)
             for (name, entry_type, entry_url) in &all_new_entries {
                 if entry_type == "folder" {
-                    dir_doc
-                        .docs
-                        .push(crate::documents::DirectoryEntry::folder(
-                            name.clone(),
-                            entry_url.to_string(),
-                        ));
+                    dir_doc.docs.push(crate::documents::DirectoryEntry::folder(
+                        name.clone(),
+                        entry_url.to_string(),
+                    ));
                 } else {
                     dir_doc.docs.push(crate::documents::DirectoryEntry::file(
                         name.clone(),
@@ -2226,7 +2253,10 @@ async fn process_sync_directory(
     let dir_heads = sync_ops::get_document_heads(&handle);
 
     // Collect old names from renames to exclude them
-    let renamed_old_names: HashSet<String> = renamed_entries.iter().map(|(old, _, _)| old.clone()).collect();
+    let renamed_old_names: HashSet<String> = renamed_entries
+        .iter()
+        .map(|(old, _, _)| old.clone())
+        .collect();
 
     let mut all_entry_names: Vec<String> = remote_entries
         .iter()
@@ -2326,7 +2356,9 @@ async fn process_sync_file(
             FileContent::binary(local_content)
         };
 
-        let local_perms = files::get_file_permissions(&abs_path).ok().map(|p| p as i64);
+        let local_perms = files::get_file_permissions(&abs_path)
+            .ok()
+            .map(|p| p as i64);
 
         match sync_ops::merge_local_into_remote(&handle, &snapshot_heads, content, local_perms) {
             Ok(new_heads) => {
@@ -2361,7 +2393,9 @@ async fn process_sync_file(
             FileContent::binary(local_content)
         };
 
-        let local_perms = files::get_file_permissions(&abs_path).ok().map(|p| p as i64);
+        let local_perms = files::get_file_permissions(&abs_path)
+            .ok()
+            .map(|p| p as i64);
 
         match sync_ops::update_file_document(&handle, content, local_perms) {
             Ok(new_heads) => {
@@ -2549,9 +2583,10 @@ async fn process_push_new_file(
 
     // Add to snapshot
     let heads = sync_ops::get_document_heads(&created.handle);
-    let parent_dir_path = relative_path.parent()
+    let parent_dir_path = relative_path
+        .parent()
         .map(|p| ctx.absolute_path(&p.to_path_buf()))
-        .unwrap_or_else(|| ctx.root_path.clone());
+        .unwrap_or_else(|| ctx.config.root_dir().to_path_buf());
     let mut snapshot = ctx.snapshot.lock().await;
     snapshot.add_file(
         path_str.clone(),
@@ -2664,7 +2699,7 @@ async fn process_push_new_directory(
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .map(|e| (e.file_name().to_string_lossy().to_string(), e.path()))
-            .filter(|(name, _)| !scanner::is_excluded(name, &ctx.exclude_patterns))
+            .filter(|(name, _)| !scanner::is_excluded(name, ctx.config.exclude_patterns()))
             .collect::<Vec<_>>(),
         Err(e) => {
             return TaskOutput::result(SyncResult::Error {
@@ -2696,9 +2731,10 @@ async fn process_push_new_directory(
 
     // Add to snapshot
     let heads = sync_ops::get_document_heads(&created.handle);
-    let parent_dir_path = relative_path.parent()
+    let parent_dir_path = relative_path
+        .parent()
         .map(|p| ctx.absolute_path(&p.to_path_buf()))
-        .unwrap_or_else(|| ctx.root_path.clone());
+        .unwrap_or_else(|| ctx.config.root_dir().to_path_buf());
     let mut snapshot = ctx.snapshot.lock().await;
     snapshot.add_directory(
         path_str.clone(),
@@ -2885,12 +2921,12 @@ async fn process_delete_local_directory(
             snapshot.remove_directory(&absolute_path);
             // Also remove any files that were inside this directory
             let prefix = absolute_path.to_string_lossy();
-            snapshot.files.retain(|(_, entry)| {
-                !entry.path.to_string_lossy().starts_with(prefix.as_ref())
-            });
-            snapshot.directories.retain(|(_, entry)| {
-                !entry.path.to_string_lossy().starts_with(prefix.as_ref())
-            });
+            snapshot
+                .files
+                .retain(|(_, entry)| !entry.path.to_string_lossy().starts_with(prefix.as_ref()));
+            snapshot
+                .directories
+                .retain(|(_, entry)| !entry.path.to_string_lossy().starts_with(prefix.as_ref()));
             drop(snapshot);
 
             TaskOutput::result(SyncResult::DeletedLocal { path: path_str })
@@ -2916,23 +2952,31 @@ mod tests {
 
     #[test]
     fn test_sync_result_is_change() {
-        assert!(SyncResult::PushedNew {
-            path: "a.txt".into()
-        }
-        .is_change());
-        assert!(SyncResult::Pulled {
-            path: "b.txt".into()
-        }
-        .is_change());
-        assert!(!SyncResult::NoChange {
-            path: "c.txt".into()
-        }
-        .is_change());
-        assert!(!SyncResult::Error {
-            path: "d.txt".into(),
-            message: "fail".into()
-        }
-        .is_change());
+        assert!(
+            SyncResult::PushedNew {
+                path: "a.txt".into()
+            }
+            .is_change()
+        );
+        assert!(
+            SyncResult::Pulled {
+                path: "b.txt".into()
+            }
+            .is_change()
+        );
+        assert!(
+            !SyncResult::NoChange {
+                path: "c.txt".into()
+            }
+            .is_change()
+        );
+        assert!(
+            !SyncResult::Error {
+                path: "d.txt".into(),
+                message: "fail".into()
+            }
+            .is_change()
+        );
     }
 
     #[test]

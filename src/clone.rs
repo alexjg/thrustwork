@@ -3,16 +3,12 @@
 //! Uses the parallel task-based architecture for efficient fetching
 //! of nested directories and files.
 
-use std::path::PathBuf;
-
-use samod::{AutomergeUrl, ConnDirection, Repo};
+use samod::{AutomergeUrl, Connection, Repo};
 use thiserror::Error;
-use tokio_tungstenite::connect_async;
 
-use crate::config::DirectoryConfig;
-use crate::init::PushworkPaths;
+use crate::config::Config;
 use crate::snapshot::Snapshot;
-use crate::sync_tasks::{run_clone, SyncContext, SyncSummary};
+use crate::sync_tasks::{SyncContext, SyncSummary, run_clone};
 
 /// Errors that can occur during clone operations
 #[derive(Debug, Error)]
@@ -41,56 +37,31 @@ pub struct CloneResult {
 
 /// Execute the full clone operation
 pub(crate) async fn execute_clone(
-    repo: &Repo,
-    url: &str,
-    cwd: PathBuf,
-    paths: PushworkPaths,
+    config: Config,
+    repo: Repo,
+    conn: Connection,
+    root_url: AutomergeUrl,
 ) -> Result<CloneResult, CloneError> {
-    // Parse URL
-    let root_url = parse_automerge_url(url)?;
-
-    // Connect to sync server (use default URL from config)
-    let config = DirectoryConfig::load(&paths.config_file).unwrap_or_default();
-    let sync_url = config.sync_server_url();
-
-    println!("Connecting to sync server: {}", sync_url);
-    let conn_id = connect_to_server(repo, &sync_url).await?;
+    let conn_id = conn.id();
 
     // Create empty snapshot
-    let snapshot = Snapshot::new(cwd.clone(), Some(root_url.clone()));
+    let snapshot = Snapshot::new(config.root_dir(), Some(root_url.clone()));
 
     // Create sync context (move_threshold not relevant for clone, but required)
-    let ctx = SyncContext::new(
-        repo.clone(),
-        conn_id,
-        cwd.clone(),
-        root_url.clone(),
-        config.exclude_patterns.clone(),
-        snapshot,
-        config.sync.move_detection_threshold,
-    );
+    let ctx = SyncContext::new(config.clone(), repo.clone(), conn_id, snapshot);
 
-    println!("Cloning from: {}", url);
+    println!("Cloning from: {}", root_url);
 
-    // Run the parallel clone
     let results = run_clone(&ctx).await;
 
     // Get the snapshot and save it
     let snapshot = ctx.snapshot.lock().await;
 
-    // Save config with root directory URL
-    let mut config = DirectoryConfig::load(&paths.config_file).unwrap_or_default();
-    config.root_directory_url = Some(root_url.to_string());
-    config
-        .save(&paths.config_file)
-        .map_err(|e| CloneError::SaveConfig(e.to_string()))?;
-
     // Save snapshot
     let mut snapshot_to_save = snapshot.clone();
     snapshot_to_save.update_timestamp();
-    let snapshot_path = Snapshot::path_in(&paths.pushwork_dir);
     snapshot_to_save
-        .save(&snapshot_path)
+        .save(&config.snapshot_path())
         .map_err(|e| CloneError::SaveSnapshot(e.to_string()))?;
 
     drop(snapshot);
@@ -109,30 +80,4 @@ pub(crate) async fn execute_clone(
         files_cloned,
         errors,
     })
-}
-
-/// Connect to the sync server
-async fn connect_to_server(
-    repo: &Repo,
-    sync_url: &str,
-) -> Result<samod::ConnectionId, CloneError> {
-    let (ws_stream, _response) = connect_async(sync_url)
-        .await
-        .map_err(|e| CloneError::ConnectionFailed(e.to_string()))?;
-
-    let conn = repo
-        .connect_tungstenite(ws_stream, ConnDirection::Outgoing)
-        .map_err(|_| CloneError::ConnectionFailed("Repo stopped".into()))?;
-
-    conn.handshake_complete()
-        .await
-        .map_err(|_| CloneError::ConnectionFailed("Handshake failed".into()))?;
-
-    Ok(conn.id())
-}
-
-/// Parse an Automerge URL
-fn parse_automerge_url(url: &str) -> Result<AutomergeUrl, CloneError> {
-    url.parse()
-        .map_err(|e| CloneError::InvalidUrl(format!("{}", e)))
 }
