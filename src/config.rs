@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use tokio_tungstenite::connect_async;
 
 mod directory_config;
-pub(crate) use directory_config::{ConfigError, DirectoryConfig, SyncConfig};
+pub(crate) use directory_config::{ConfigError, DirectoryConfig};
 
 use crate::{PushworkPaths, documents::DirectoryDocument};
 
@@ -64,11 +64,17 @@ impl Config {
         })
     }
 
-    pub(crate) fn load<P: AsRef<Path>>(root_dir: P) -> Result<Self, ConfigError> {
-        let paths = PushworkPaths::new(root_dir.as_ref());
+    pub(crate) fn load(paths: PushworkPaths) -> Result<Self, ConfigError> {
         let config_file = DirectoryConfig::load(&paths.config_file)?;
 
         Ok(Self { paths, config_file })
+    }
+
+    pub(crate) fn find_from_cwd(cwd: &Path) -> Result<Self, ConfigError> {
+        let Some(paths) = PushworkPaths::find_from(cwd) else {
+            return Err(ConfigError::NotAPushworkDirectory(cwd.to_path_buf()));
+        };
+        Self::load(paths)
     }
 
     pub(crate) fn save(&self) -> Result<(), ConfigError> {

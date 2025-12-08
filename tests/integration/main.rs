@@ -37,7 +37,10 @@ async fn test_push_and_clone_single_file() {
 
     // Client B clones
     let client_b = harness.create_client("client-b").await;
-    client_b.clone(&root_url).await.expect("clone should succeed");
+    client_b
+        .clone(&root_url)
+        .await
+        .expect("clone should succeed");
 
     // Verify content matches
     let content = client_b.read_file("hello.txt").await;
@@ -60,7 +63,10 @@ async fn test_push_and_clone_multiple_files() {
     let root_url = client_a.root_url().await.expect("should have root URL");
 
     let client_b = harness.create_client("client-b").await;
-    client_b.clone(&root_url).await.expect("clone should succeed");
+    client_b
+        .clone(&root_url)
+        .await
+        .expect("clone should succeed");
 
     assert_eq!(client_b.read_file("file1.txt").await, "Content 1");
     assert_eq!(client_b.read_file("file2.txt").await, "Content 2");
@@ -76,7 +82,9 @@ async fn test_push_and_clone_nested_directories() {
     client_a.init().await.expect("init should succeed");
 
     client_a.write_file("root.txt", "root content").await;
-    client_a.write_file("subdir/nested.txt", "nested content").await;
+    client_a
+        .write_file("subdir/nested.txt", "nested content")
+        .await;
     client_a
         .write_file("subdir/deep/deeper.txt", "deep content")
         .await;
@@ -85,10 +93,16 @@ async fn test_push_and_clone_nested_directories() {
     let root_url = client_a.root_url().await.expect("should have root URL");
 
     let client_b = harness.create_client("client-b").await;
-    client_b.clone(&root_url).await.expect("clone should succeed");
+    client_b
+        .clone(&root_url)
+        .await
+        .expect("clone should succeed");
 
     assert_eq!(client_b.read_file("root.txt").await, "root content");
-    assert_eq!(client_b.read_file("subdir/nested.txt").await, "nested content");
+    assert_eq!(
+        client_b.read_file("subdir/nested.txt").await,
+        "nested content"
+    );
     assert_eq!(
         client_b.read_file("subdir/deep/deeper.txt").await,
         "deep content"
@@ -242,7 +256,9 @@ async fn test_binary_file_sync() {
         0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk start
         0xDE, 0xAD, 0xBE, 0xEF, // Some arbitrary bytes
     ];
-    client_a.write_binary_file("test.png", &binary_content).await;
+    client_a
+        .write_binary_file("test.png", &binary_content)
+        .await;
     client_a.sync().await.unwrap();
 
     let root_url = client_a.root_url().await.unwrap();
@@ -301,11 +317,18 @@ async fn test_rename_file_preserves_document_url() {
     // Setup: A creates and syncs a file
     let client_a = harness.create_client("client-a").await;
     client_a.init().await.unwrap();
-    client_a.write_file("original.txt", "This is the original content that should be preserved").await;
+    client_a
+        .write_file(
+            "original.txt",
+            "This is the original content that should be preserved",
+        )
+        .await;
     client_a.sync().await.unwrap();
 
     // Get the document URL before rename
-    let url_before = client_a.get_file_url("original.txt").await
+    let url_before = client_a
+        .get_file_url("original.txt")
+        .await
         .expect("should have URL in snapshot");
 
     // Rename the file locally
@@ -317,9 +340,14 @@ async fn test_rename_file_preserves_document_url() {
     assert!(client_a.file_exists("renamed.txt").await);
 
     // Get the document URL after rename - should be the same (document identity preserved)
-    let url_after = client_a.get_file_url("renamed.txt").await
+    let url_after = client_a
+        .get_file_url("renamed.txt")
+        .await
         .expect("should have URL in snapshot");
-    assert_eq!(url_before, url_after, "Document URL should be preserved after rename");
+    assert_eq!(
+        url_before, url_after,
+        "Document URL should be preserved after rename"
+    );
 
     // Verify content is unchanged
     assert_eq!(
@@ -336,7 +364,9 @@ async fn test_rename_file_fresh_sync() {
     // Client renames file between syncs
     let client_a = harness.create_client("client-a").await;
     client_a.init().await.unwrap();
-    client_a.write_file("original.txt", "Content to be renamed").await;
+    client_a
+        .write_file("original.txt", "Content to be renamed")
+        .await;
     client_a.sync().await.unwrap();
 
     // Rename locally
@@ -348,7 +378,10 @@ async fn test_rename_file_fresh_sync() {
     // Verify file exists with new name
     assert!(!client_a.file_exists("original.txt").await);
     assert!(client_a.file_exists("newname.txt").await);
-    assert_eq!(client_a.read_file("newname.txt").await, "Content to be renamed");
+    assert_eq!(
+        client_a.read_file("newname.txt").await,
+        "Content to be renamed"
+    );
 }
 
 /// Test: rename file, sync to other client, verify other client sees rename
@@ -359,7 +392,9 @@ async fn test_rename_syncs_to_other_client() {
     // Setup: A creates file, B clones
     let client_a = harness.create_client("client-a").await;
     client_a.init().await.unwrap();
-    client_a.write_file("original.txt", "Content to be renamed").await;
+    client_a
+        .write_file("original.txt", "Content to be renamed")
+        .await;
     client_a.sync().await.unwrap();
 
     let root_url = client_a.root_url().await.unwrap();
@@ -378,7 +413,10 @@ async fn test_rename_syncs_to_other_client() {
 
     assert!(!client_b.file_exists("original.txt").await);
     assert!(client_b.file_exists("newname.txt").await);
-    assert_eq!(client_b.read_file("newname.txt").await, "Content to be renamed");
+    assert_eq!(
+        client_b.read_file("newname.txt").await,
+        "Content to be renamed"
+    );
 }
 
 /// Test: rename with content modification - if similar enough, still detected as move
@@ -391,7 +429,9 @@ async fn test_rename_with_small_content_change() {
     client_a.write_file("original.txt", "This is a long piece of content that should be mostly preserved even after a small edit").await;
     client_a.sync().await.unwrap();
 
-    let url_before = client_a.get_file_url("original.txt").await
+    let url_before = client_a
+        .get_file_url("original.txt")
+        .await
         .expect("should have URL");
 
     // Delete old file and create new file with slightly modified content
@@ -399,11 +439,16 @@ async fn test_rename_with_small_content_change() {
     client_a.write_file("renamed.txt", "This is a long piece of content that should be mostly preserved even after a small edit!").await;
     client_a.sync().await.unwrap();
 
-    let url_after = client_a.get_file_url("renamed.txt").await
+    let url_after = client_a
+        .get_file_url("renamed.txt")
+        .await
         .expect("should have URL");
 
     // Should be detected as a move (>70% similar)
-    assert_eq!(url_before, url_after, "Should detect as move due to high similarity");
+    assert_eq!(
+        url_before, url_after,
+        "Should detect as move due to high similarity"
+    );
 }
 
 /// Test: different content should NOT be detected as move
@@ -413,22 +458,33 @@ async fn test_different_content_not_detected_as_move() {
 
     let client_a = harness.create_client("client-a").await;
     client_a.init().await.unwrap();
-    client_a.write_file("file1.txt", "AAAAAAAAAAAAAAAAAAAA").await;
+    client_a
+        .write_file("file1.txt", "AAAAAAAAAAAAAAAAAAAA")
+        .await;
     client_a.sync().await.unwrap();
 
-    let url_before = client_a.get_file_url("file1.txt").await
+    let url_before = client_a
+        .get_file_url("file1.txt")
+        .await
         .expect("should have URL");
 
     // Delete old file and create completely different new file
     client_a.delete_file("file1.txt").await;
-    client_a.write_file("file2.txt", "BBBBBBBBBBBBBBBBBBBB").await;
+    client_a
+        .write_file("file2.txt", "BBBBBBBBBBBBBBBBBBBB")
+        .await;
     client_a.sync().await.unwrap();
 
-    let url_after = client_a.get_file_url("file2.txt").await
+    let url_after = client_a
+        .get_file_url("file2.txt")
+        .await
         .expect("should have URL");
 
     // Should NOT be detected as a move - URLs should be different
-    assert_ne!(url_before, url_after, "Completely different content should not be detected as move");
+    assert_ne!(
+        url_before, url_after,
+        "Completely different content should not be detected as move"
+    );
 }
 
 /// Test: cross-directory move - file moved from root to subdirectory
@@ -440,24 +496,41 @@ async fn test_cross_directory_move_to_subdir() {
     client_a.init().await.unwrap();
 
     // Create a file in root and a subdirectory
-    client_a.write_file("moveme.txt", "This file will be moved to a subdirectory").await;
+    client_a
+        .write_file("moveme.txt", "This file will be moved to a subdirectory")
+        .await;
     client_a.create_dir("subdir").await;
     client_a.sync().await.unwrap();
 
-    let url_before = client_a.get_file_url("moveme.txt").await
+    let url_before = client_a
+        .get_file_url("moveme.txt")
+        .await
         .expect("should have URL");
 
     // Move file from root to subdirectory
-    client_a.rename_file("moveme.txt", "subdir/moveme.txt").await;
+    client_a
+        .rename_file("moveme.txt", "subdir/moveme.txt")
+        .await;
     client_a.sync().await.unwrap();
 
     // Should be detected as a cross-directory move - URL should be preserved
-    let url_after = client_a.get_file_url("subdir/moveme.txt").await
+    let url_after = client_a
+        .get_file_url("subdir/moveme.txt")
+        .await
         .expect("should have URL");
 
-    assert_eq!(url_before, url_after, "Cross-directory move should preserve document URL");
-    assert!(!client_a.file_exists("moveme.txt").await, "Original file should be gone");
-    assert!(client_a.file_exists("subdir/moveme.txt").await, "File should be in new location");
+    assert_eq!(
+        url_before, url_after,
+        "Cross-directory move should preserve document URL"
+    );
+    assert!(
+        !client_a.file_exists("moveme.txt").await,
+        "Original file should be gone"
+    );
+    assert!(
+        client_a.file_exists("subdir/moveme.txt").await,
+        "File should be in new location"
+    );
 }
 
 /// Test: cross-directory move - file moved from subdirectory to root
@@ -470,23 +543,40 @@ async fn test_cross_directory_move_from_subdir() {
 
     // Create a file in subdirectory
     client_a.create_dir("subdir").await;
-    client_a.write_file("subdir/moveme.txt", "This file will be moved to root").await;
+    client_a
+        .write_file("subdir/moveme.txt", "This file will be moved to root")
+        .await;
     client_a.sync().await.unwrap();
 
-    let url_before = client_a.get_file_url("subdir/moveme.txt").await
+    let url_before = client_a
+        .get_file_url("subdir/moveme.txt")
+        .await
         .expect("should have URL");
 
     // Move file from subdirectory to root
-    client_a.rename_file("subdir/moveme.txt", "moveme.txt").await;
+    client_a
+        .rename_file("subdir/moveme.txt", "moveme.txt")
+        .await;
     client_a.sync().await.unwrap();
 
     // Should be detected as a cross-directory move - URL should be preserved
-    let url_after = client_a.get_file_url("moveme.txt").await
+    let url_after = client_a
+        .get_file_url("moveme.txt")
+        .await
         .expect("should have URL");
 
-    assert_eq!(url_before, url_after, "Cross-directory move should preserve document URL");
-    assert!(!client_a.file_exists("subdir/moveme.txt").await, "Original file should be gone");
-    assert!(client_a.file_exists("moveme.txt").await, "File should be in new location");
+    assert_eq!(
+        url_before, url_after,
+        "Cross-directory move should preserve document URL"
+    );
+    assert!(
+        !client_a.file_exists("subdir/moveme.txt").await,
+        "Original file should be gone"
+    );
+    assert!(
+        client_a.file_exists("moveme.txt").await,
+        "File should be in new location"
+    );
 }
 
 /// Test: cross-directory move syncs to other client
@@ -498,7 +588,9 @@ async fn test_cross_directory_move_syncs_to_other_client() {
     client_a.init().await.unwrap();
 
     // Create a file in root and a subdirectory
-    client_a.write_file("moveme.txt", "Content that will be moved cross-directory").await;
+    client_a
+        .write_file("moveme.txt", "Content that will be moved cross-directory")
+        .await;
     client_a.create_dir("target").await;
     client_a.sync().await.unwrap();
 
@@ -512,14 +604,22 @@ async fn test_cross_directory_move_syncs_to_other_client() {
     assert!(!client_b.file_exists("target/moveme.txt").await);
 
     // A moves the file to subdirectory
-    client_a.rename_file("moveme.txt", "target/moveme.txt").await;
+    client_a
+        .rename_file("moveme.txt", "target/moveme.txt")
+        .await;
     client_a.sync().await.unwrap();
 
     // B syncs and should see the file in its new location
     client_b.sync().await.unwrap();
 
-    assert!(!client_b.file_exists("moveme.txt").await, "File should be gone from root");
-    assert!(client_b.file_exists("target/moveme.txt").await, "File should be in target dir");
+    assert!(
+        !client_b.file_exists("moveme.txt").await,
+        "File should be gone from root"
+    );
+    assert!(
+        client_b.file_exists("target/moveme.txt").await,
+        "File should be in target dir"
+    );
     assert_eq!(
         client_b.read_file("target/moveme.txt").await,
         "Content that will be moved cross-directory"
@@ -540,7 +640,10 @@ async fn test_url_command() {
     client.init().await.unwrap();
 
     // Get root URL from config for comparison
-    let expected_url = client.root_url().await.expect("Should have root URL after init");
+    let expected_url = client
+        .root_url()
+        .await
+        .expect("Should have root URL after init");
 
     // Run the url command
     let output = client.url_command().await.unwrap();
@@ -560,7 +663,10 @@ async fn test_url_command_not_initialized() {
     let output = client.run_command_raw(&["url"]).await.unwrap();
 
     // Should fail with non-zero exit code
-    assert!(!output.status.success(), "url command should fail when not initialized");
+    assert!(
+        !output.status.success(),
+        "url command should fail when not initialized"
+    );
 
     // Should have helpful error message
     let stderr = String::from_utf8_lossy(&output.stderr);

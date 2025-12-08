@@ -143,10 +143,7 @@ impl TestClient {
         if !output.status.success() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!(
-                    "init failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
+                format!("init failed: {}", String::from_utf8_lossy(&output.stderr)),
             ));
         }
 
@@ -162,10 +159,7 @@ impl TestClient {
         if !output.status.success() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!(
-                    "clone failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
+                format!("clone failed: {}", String::from_utf8_lossy(&output.stderr)),
             ));
         }
 
@@ -181,10 +175,7 @@ impl TestClient {
         if !output.status.success() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!(
-                    "sync failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
+                format!("sync failed: {}", String::from_utf8_lossy(&output.stderr)),
             ));
         }
 
@@ -198,10 +189,7 @@ impl TestClient {
         if !output.status.success() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!(
-                    "url failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
+                format!("url failed: {}", String::from_utf8_lossy(&output.stderr)),
             ));
         }
 
@@ -298,9 +286,7 @@ impl TestClient {
         let files = snapshot.get("files")?.as_array()?;
 
         // Try matching by filename
-        let target_filename = std::path::Path::new(relative_path)
-            .file_name()?
-            .to_str()?;
+        let target_filename = std::path::Path::new(relative_path).file_name()?.to_str()?;
 
         for pair in files {
             let pair_arr = pair.as_array()?;

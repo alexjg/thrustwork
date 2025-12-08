@@ -10,6 +10,184 @@ use samod::AutomergeUrl;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::config::Config;
+
+/// The snapshot file structure
+///
+/// This matches pushwork's snapshot format for compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Snapshot {
+    /// Unix timestamp (ms) when snapshot was saved
+    pub timestamp: u64,
+
+    /// Absolute path to the synced directory
+    pub root_path: PathBuf,
+
+    /// Automerge URL of the root directory document
+    #[serde(
+        with = "automerge_url_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub root_directory_url: Option<AutomergeUrl>,
+
+    /// Array of [relative-path, file-entry] tuples
+    pub files: Vec<(String, SnapshotFileEntry)>,
+
+    /// Array of [relative-path, directory-entry] tuples
+    pub directories: Vec<(String, SnapshotDirectoryEntry)>,
+}
+
+/// A file entry in the snapshot
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotFileEntry {
+    /// Full filesystem path
+    pub path: PathBuf,
+
+    /// Automerge URL of the file document
+    #[serde(with = "automerge_url_serde")]
+    pub url: AutomergeUrl,
+
+    /// Document heads at last sync
+    #[serde(with = "change_hash_vec")]
+    pub head: Vec<ChangeHash>,
+
+    /// File extension (without dot)
+    pub extension: String,
+
+    /// MIME type
+    pub mime_type: String,
+}
+
+/// A directory entry in the snapshot
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotDirectoryEntry {
+    /// Full filesystem path
+    pub path: PathBuf,
+
+    /// Automerge URL of the directory document
+    #[serde(with = "automerge_url_serde")]
+    pub url: AutomergeUrl,
+
+    /// Document heads at last sync
+    #[serde(with = "change_hash_vec")]
+    pub head: Vec<ChangeHash>,
+
+    /// Names of child entries at last sync
+    pub entries: Vec<String>,
+}
+
+impl Snapshot {
+    /// Create a new empty snapshot
+    pub(crate) fn new<P: AsRef<Path>>(
+        root_path: P,
+        root_directory_url: Option<AutomergeUrl>,
+    ) -> Self {
+        Self {
+            timestamp: 0,
+            root_path: root_path.as_ref().to_path_buf(),
+            root_directory_url,
+            files: Vec::new(),
+            directories: Vec::new(),
+        }
+    }
+
+    pub(crate) fn load_or_create(config: &Config) -> Snapshot {
+        let snapshot_path = config.snapshot_path();
+
+        if snapshot_path.exists() {
+            if let Ok(s) = Snapshot::load(&snapshot_path) {
+                return s;
+            } else {
+                eprintln!("Warning: Failed to load snapshot, starting fresh");
+            }
+        }
+        Snapshot::new(config.root_dir(), Some(config.root_doc_url().clone()))
+    }
+
+    /// Load snapshot from a file
+    pub fn load(path: &Path) -> Result<Self, SnapshotError> {
+        let content = std::fs::read_to_string(path)?;
+        let snapshot = serde_json::from_str(&content).map_err(SnapshotError::Parse)?;
+        Ok(snapshot)
+    }
+
+    /// Save snapshot to a file
+    pub fn save(&self, path: &Path) -> Result<(), SnapshotError> {
+        let content = serde_json::to_string_pretty(self).map_err(SnapshotError::Serialize)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Update the timestamp to now (in milliseconds)
+    pub fn update_timestamp(&mut self) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        self.timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as u64;
+    }
+
+    /// Add a file entry to the snapshot
+    pub fn add_file(&mut self, relative_path: String, entry: SnapshotFileEntry) {
+        // Remove existing entry with same path if present
+        self.files.retain(|(p, _)| p != &relative_path);
+        self.files.push((relative_path, entry));
+    }
+
+    /// Add a directory entry to the snapshot
+    pub fn add_directory(&mut self, relative_path: String, entry: SnapshotDirectoryEntry) {
+        // Remove existing entry with same path if present
+        self.directories.retain(|(p, _)| p != &relative_path);
+        self.directories.push((relative_path, entry));
+    }
+
+    /// Get a directory entry by absolute path
+    pub fn get_directory(&self, absolute_path: &Path) -> Option<&SnapshotDirectoryEntry> {
+        self.directories
+            .iter()
+            .find(|(_, entry)| entry.path == absolute_path)
+            .map(|(_, e)| e)
+    }
+
+    /// Remove a file entry from the snapshot by absolute path
+    ///
+    /// Returns true if the file was found and removed, false if not found.
+    pub fn remove_file(&mut self, absolute_path: &Path) -> bool {
+        let len_before = self.files.len();
+        self.files.retain(|(_, entry)| entry.path != absolute_path);
+        self.files.len() < len_before
+    }
+
+    /// Remove a directory entry from the snapshot by absolute path
+    ///
+    /// Returns true if the directory was found and removed, false if not found.
+    pub fn remove_directory(&mut self, absolute_path: &Path) -> bool {
+        let len_before = self.directories.len();
+        self.directories
+            .retain(|(_, entry)| entry.path != absolute_path);
+        self.directories.len() < len_before
+    }
+}
+
+/// Errors that can occur when working with snapshots
+#[derive(Debug, Error)]
+pub enum SnapshotError {
+    /// IO error reading/writing snapshot file
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Error parsing snapshot JSON
+    #[error("Failed to parse snapshot: {0}")]
+    Parse(#[source] serde_json::Error),
+
+    /// Error serializing snapshot to JSON
+    #[error("Failed to serialize snapshot: {0}")]
+    Serialize(#[source] serde_json::Error),
+}
+
 /// Serialize/deserialize Vec<ChangeHash> as Vec<String> (base58check-encoded)
 ///
 /// This matches the format used by automerge-repo in JavaScript (UrlHeads).
@@ -95,212 +273,6 @@ mod automerge_url_option_serde {
                 .map(Some)
                 .map_err(|e| serde::de::Error::custom(format!("invalid automerge url: {}", e))),
             None => Ok(None),
-        }
-    }
-}
-
-/// Errors that can occur when working with snapshots
-#[derive(Debug, Error)]
-pub enum SnapshotError {
-    /// IO error reading/writing snapshot file
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// Error parsing snapshot JSON
-    #[error("Failed to parse snapshot: {0}")]
-    Parse(#[source] serde_json::Error),
-
-    /// Error serializing snapshot to JSON
-    #[error("Failed to serialize snapshot: {0}")]
-    Serialize(#[source] serde_json::Error),
-}
-
-/// A file entry in the snapshot
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotFileEntry {
-    /// Full filesystem path
-    pub path: PathBuf,
-
-    /// Automerge URL of the file document
-    #[serde(with = "automerge_url_serde")]
-    pub url: AutomergeUrl,
-
-    /// Document heads at last sync
-    #[serde(with = "change_hash_vec")]
-    pub head: Vec<ChangeHash>,
-
-    /// File extension (without dot)
-    pub extension: String,
-
-    /// MIME type
-    pub mime_type: String,
-}
-
-/// A directory entry in the snapshot
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotDirectoryEntry {
-    /// Full filesystem path
-    pub path: PathBuf,
-
-    /// Automerge URL of the directory document
-    #[serde(with = "automerge_url_serde")]
-    pub url: AutomergeUrl,
-
-    /// Document heads at last sync
-    #[serde(with = "change_hash_vec")]
-    pub head: Vec<ChangeHash>,
-
-    /// Names of child entries at last sync
-    pub entries: Vec<String>,
-}
-
-/// The snapshot file structure
-///
-/// This matches pushwork's snapshot format for compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Snapshot {
-    /// Unix timestamp (ms) when snapshot was saved
-    pub timestamp: u64,
-
-    /// Absolute path to the synced directory
-    pub root_path: PathBuf,
-
-    /// Automerge URL of the root directory document
-    #[serde(
-        with = "automerge_url_option_serde",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub root_directory_url: Option<AutomergeUrl>,
-
-    /// Array of [relative-path, file-entry] tuples
-    pub files: Vec<(String, SnapshotFileEntry)>,
-
-    /// Array of [relative-path, directory-entry] tuples
-    pub directories: Vec<(String, SnapshotDirectoryEntry)>,
-}
-
-impl Snapshot {
-    /// Create a new empty snapshot
-    pub fn new<P: AsRef<Path>>(root_path: P, root_directory_url: Option<AutomergeUrl>) -> Self {
-        Self {
-            timestamp: 0,
-            root_path: root_path.as_ref().to_path_buf(),
-            root_directory_url,
-            files: Vec::new(),
-            directories: Vec::new(),
-        }
-    }
-
-    /// Load snapshot from a file
-    pub fn load(path: &Path) -> Result<Self, SnapshotError> {
-        let content = std::fs::read_to_string(path)?;
-        let snapshot = serde_json::from_str(&content).map_err(SnapshotError::Parse)?;
-        Ok(snapshot)
-    }
-
-    /// Save snapshot to a file
-    pub fn save(&self, path: &Path) -> Result<(), SnapshotError> {
-        let content = serde_json::to_string_pretty(self).map_err(SnapshotError::Serialize)?;
-        std::fs::write(path, content)?;
-        Ok(())
-    }
-
-    /// Update the timestamp to now (in milliseconds)
-    pub fn update_timestamp(&mut self) {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        self.timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as u64;
-    }
-
-    /// Add a file entry to the snapshot
-    pub fn add_file(&mut self, relative_path: String, entry: SnapshotFileEntry) {
-        // Remove existing entry with same path if present
-        self.files.retain(|(p, _)| p != &relative_path);
-        self.files.push((relative_path, entry));
-    }
-
-    /// Add a directory entry to the snapshot
-    pub fn add_directory(&mut self, relative_path: String, entry: SnapshotDirectoryEntry) {
-        // Remove existing entry with same path if present
-        self.directories.retain(|(p, _)| p != &relative_path);
-        self.directories.push((relative_path, entry));
-    }
-
-    /// Get a file entry by absolute path
-    pub fn get_file(&self, absolute_path: &Path) -> Option<&SnapshotFileEntry> {
-        self.files
-            .iter()
-            .find(|(_, entry)| entry.path == absolute_path)
-            .map(|(_, e)| e)
-    }
-
-    /// Update the heads for an existing file entry
-    ///
-    /// Returns true if the file was found and updated, false if not found.
-    pub fn update_file_heads(&mut self, absolute_path: &Path, new_heads: Vec<ChangeHash>) -> bool {
-        for (_, entry) in &mut self.files {
-            if entry.path == absolute_path {
-                entry.head = new_heads;
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Get a directory entry by absolute path
-    pub fn get_directory(&self, absolute_path: &Path) -> Option<&SnapshotDirectoryEntry> {
-        self.directories
-            .iter()
-            .find(|(_, entry)| entry.path == absolute_path)
-            .map(|(_, e)| e)
-    }
-
-    /// Remove a file entry from the snapshot by absolute path
-    ///
-    /// Returns true if the file was found and removed, false if not found.
-    pub fn remove_file(&mut self, absolute_path: &Path) -> bool {
-        let len_before = self.files.len();
-        self.files.retain(|(_, entry)| entry.path != absolute_path);
-        self.files.len() < len_before
-    }
-
-    /// Remove a directory entry from the snapshot by absolute path
-    ///
-    /// Returns true if the directory was found and removed, false if not found.
-    pub fn remove_directory(&mut self, absolute_path: &Path) -> bool {
-        let len_before = self.directories.len();
-        self.directories
-            .retain(|(_, entry)| entry.path != absolute_path);
-        self.directories.len() < len_before
-    }
-
-    /// Add an entry name to a directory's entries list
-    ///
-    /// This is used when a new file/folder is added to track which names
-    /// belong to which directory.
-    pub fn add_directory_entry(&mut self, dir_absolute_path: &Path, entry_name: String) {
-        for (_, entry) in &mut self.directories {
-            if entry.path == dir_absolute_path {
-                if !entry.entries.contains(&entry_name) {
-                    entry.entries.push(entry_name);
-                }
-                return;
-            }
-        }
-    }
-
-    /// Remove an entry name from a directory's entries list
-    pub fn remove_directory_entry(&mut self, dir_absolute_path: &Path, entry_name: &str) {
-        for (_, entry) in &mut self.directories {
-            if entry.path == dir_absolute_path {
-                entry.entries.retain(|n| n != entry_name);
-                return;
-            }
         }
     }
 }
@@ -428,25 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_get_file() {
-        let mut snapshot = Snapshot::new(PathBuf::from("/tmp/test"), None);
-
-        snapshot.add_file(
-            "a.txt".to_string(),
-            SnapshotFileEntry {
-                path: PathBuf::from("/tmp/test/a.txt"),
-                url: test_url(UUID_A),
-                head: vec![],
-                extension: "txt".to_string(),
-                mime_type: "text/plain".to_string(),
-            },
-        );
-
-        assert!(snapshot.get_file(Path::new("/tmp/test/a.txt")).is_some());
-        assert!(snapshot.get_file(Path::new("/tmp/test/b.txt")).is_none());
-    }
-
-    #[test]
     fn test_snapshot_add_file_replaces_existing() {
         let mut snapshot = Snapshot::new(PathBuf::from("/tmp/test"), None);
 
@@ -477,14 +430,6 @@ mod tests {
         );
 
         assert_eq!(snapshot.files.len(), 1);
-        // URL changed to url_b - check head was updated (proves replacement occurred)
-        assert_eq!(
-            snapshot
-                .get_file(Path::new("/tmp/test/test.txt"))
-                .unwrap()
-                .head,
-            vec![test_hash(HASH_B)]
-        );
     }
 
     #[test]
@@ -498,46 +443,5 @@ mod tests {
         assert!(json.contains("\"rootDirectoryUrl\""));
         assert!(!json.contains("\"root_path\""));
         assert!(!json.contains("\"root_directory_url\""));
-    }
-
-    #[test]
-    fn test_update_file_heads() {
-        let mut snapshot = Snapshot::new(PathBuf::from("/tmp/test"), None);
-
-        snapshot.add_file(
-            "test.txt".to_string(),
-            SnapshotFileEntry {
-                path: PathBuf::from("/tmp/test/test.txt"),
-                url: test_url(UUID_A),
-                head: vec![test_hash(HASH_A)],
-                extension: "txt".to_string(),
-                mime_type: "text/plain".to_string(),
-            },
-        );
-
-        // Update heads
-        let updated =
-            snapshot.update_file_heads(Path::new("/tmp/test/test.txt"), vec![test_hash(HASH_B)]);
-        assert!(updated);
-
-        // Verify heads changed
-        let entry = snapshot.get_file(Path::new("/tmp/test/test.txt")).unwrap();
-        assert_eq!(entry.head, vec![test_hash(HASH_B)]);
-
-        // URL and other fields should be unchanged
-        assert_eq!(entry.url.to_string(), test_url(UUID_A).to_string());
-        assert_eq!(entry.extension, "txt");
-    }
-
-    #[test]
-    fn test_update_file_heads_not_found() {
-        let mut snapshot = Snapshot::new(PathBuf::from("/tmp/test"), None);
-
-        // Try to update a file that doesn't exist
-        let updated = snapshot.update_file_heads(
-            Path::new("/tmp/test/nonexistent.txt"),
-            vec![test_hash(HASH_A)],
-        );
-        assert!(!updated);
     }
 }

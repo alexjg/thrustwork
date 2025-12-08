@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use samod::AutomergeUrl;
 use serde::{Deserialize, Serialize};
@@ -82,10 +82,7 @@ mod serde_automergeurl {
     pub(crate) fn serialize<S: Serializer>(
         url: &AutomergeUrl,
         serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
+    ) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&url.to_string())
     }
 
@@ -120,4 +117,7 @@ pub enum ConfigError {
     /// Error serializing config to JSON
     #[error("Failed to serialize config: {0}")]
     Serialize(#[source] serde_json::Error),
+
+    #[error("{0} is not a pushwork directory or within a pushwork directory")]
+    NotAPushworkDirectory(PathBuf),
 }

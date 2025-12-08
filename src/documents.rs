@@ -13,123 +13,100 @@
 use autosurgeon::reconcile::NoKey;
 use autosurgeon::{Hydrate, HydrateError, Reconcile, Reconciler, Text};
 
-/// The `@patchwork` type marker present in all pushwork documents.
+/// A directory document matching the pushwork schema.
 ///
-/// This nested structure contains the document type discriminator.
-/// The `type` field is a Text object (collaborative string) in pushwork.
+/// Schema:
+/// ```json
+/// {
+///   "@patchwork": { "type": "folder" },
+///   "docs": [
+///     { "name": "file.txt", "type": "file", "url": "automerge:..." },
+///     ...
+///   ],
+///   "lastSyncAt": 1234567890
+/// }
+/// ```
 #[derive(Debug, Clone, Reconcile, Hydrate)]
-pub struct PatchworkMarker {
-    /// The document type: "file" or "folder" (as collaborative Text)
+pub struct DirectoryDocument {
+    /// Type marker - always `{ type: "folder" }`
+    #[autosurgeon(rename = "@patchwork")]
+    pub patchwork: PatchworkMarker,
+
+    /// Array of directory entries
+    pub docs: Vec<DirectoryEntry>,
+
+    /// Unix timestamp (ms) of last sync, if any.
+    /// This field may be absent in pushwork documents, so we use missing = "Default::default"
+    /// Automerge stores integers as i64 (Int), not u64.
+    #[autosurgeon(rename = "lastSyncAt", missing = "Default::default")]
+    pub last_sync_at: Option<i64>,
+}
+
+impl DirectoryDocument {
+    /// Create a new empty directory document.
+    pub fn new() -> Self {
+        Self {
+            patchwork: PatchworkMarker::folder(),
+            docs: Vec::new(),
+            last_sync_at: None,
+        }
+    }
+}
+
+impl Default for DirectoryDocument {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// An entry in a directory's `docs` array.
+/// All fields are collaborative Text in pushwork.
+///
+/// The `name` field is marked as `#[key]` so that autosurgeon can properly
+/// track directory entries during CRDT reconciliation. This enables correct
+/// merging when entries are added/removed concurrently by different clients.
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+pub struct DirectoryEntry {
+    /// Entry name (filename or subdirectory name) - collaborative Text
+    /// This is the key field for CRDT reconciliation of the docs array.
+    #[key]
+    pub name: Text,
+
+    /// Entry type: "file" or "folder" - collaborative Text
     #[autosurgeon(rename = "type")]
-    pub doc_type: Text,
+    pub entry_type: Text,
+
+    /// Automerge URL of the child document - collaborative Text
+    pub url: Text,
 }
 
-impl PatchworkMarker {
-    pub fn file() -> Self {
+impl DirectoryEntry {
+    pub fn file(name: String, url: String) -> Self {
         Self {
-            doc_type: Text::with_value("file"),
+            name: Text::with_value(name),
+            entry_type: Text::with_value("file"),
+            url: Text::with_value(url),
         }
     }
 
-    pub fn folder() -> Self {
+    pub fn folder(name: String, url: String) -> Self {
         Self {
-            doc_type: Text::with_value("folder"),
+            name: Text::with_value(name),
+            entry_type: Text::with_value("folder"),
+            url: Text::with_value(url),
         }
     }
 
-    pub fn doc_type_str(&self) -> &str {
-        self.doc_type.as_str()
-    }
-}
-
-/// Metadata for a file document.
-#[derive(Debug, Clone, PartialEq, Eq, Reconcile, Hydrate)]
-pub struct FileMetadata {
-    /// Unix permissions as decimal (e.g., 644)
-    /// Stored as i64 in Automerge (JavaScript number -> Int)
-    pub permissions: i64,
-}
-
-/// File content that can be either text (String) or binary (bytes).
-///
-/// This enum has custom Reconcile/Hydrate implementations that:
-/// - Reconcile: writes String scalar for Text, Bytes scalar for Binary
-/// - Hydrate: inspects the Automerge value type to determine which variant
-///
-/// This matches pushwork's behavior where text files use ImmutableString
-/// and binary files use Bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileContent {
-    /// Text content stored as Automerge scalar string
-    Text(String),
-    /// Binary content stored as Automerge Bytes
-    Binary(Vec<u8>),
-}
-
-impl FileContent {
-    /// Create text content from a string.
-    pub fn text(s: impl Into<String>) -> Self {
-        Self::Text(s.into())
+    pub fn name_str(&self) -> &str {
+        self.name.as_str()
     }
 
-    /// Create binary content from bytes.
-    pub fn binary(b: impl Into<Vec<u8>>) -> Self {
-        Self::Binary(b.into())
+    pub fn entry_type_str(&self) -> &str {
+        self.entry_type.as_str()
     }
 
-    /// Returns true if this is text content.
-    pub fn is_text(&self) -> bool {
-        matches!(self, Self::Text(_))
-    }
-
-    /// Returns true if this is binary content.
-    pub fn is_binary(&self) -> bool {
-        matches!(self, Self::Binary(_))
-    }
-
-    /// Get as text if this is text content.
-    pub fn as_text(&self) -> Option<&str> {
-        match self {
-            Self::Text(s) => Some(s),
-            Self::Binary(_) => None,
-        }
-    }
-
-    /// Get as bytes if this is binary content.
-    pub fn as_binary(&self) -> Option<&[u8]> {
-        match self {
-            Self::Text(_) => None,
-            Self::Binary(b) => Some(b),
-        }
-    }
-
-    /// Get the content as bytes (works for both text and binary).
-    pub fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Text(s) => s.as_bytes(),
-            Self::Binary(b) => b,
-        }
-    }
-}
-
-impl Reconcile for FileContent {
-    type Key<'a> = NoKey;
-
-    fn reconcile<R: Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
-        match self {
-            Self::Text(s) => reconciler.str(s),
-            Self::Binary(b) => reconciler.bytes(b),
-        }
-    }
-}
-
-impl Hydrate for FileContent {
-    fn hydrate_string(s: &str) -> Result<Self, HydrateError> {
-        Ok(Self::Text(s.to_string()))
-    }
-
-    fn hydrate_bytes(bytes: &[u8]) -> Result<Self, HydrateError> {
-        Ok(Self::Binary(bytes.to_vec()))
+    pub fn url_str(&self) -> &str {
+        self.url.as_str()
     }
 }
 
@@ -211,11 +188,6 @@ impl FileDocument {
         }
     }
 
-    /// Get the name as a string slice.
-    pub fn name_str(&self) -> &str {
-        self.name.as_str()
-    }
-
     /// Get the extension as a string slice.
     pub fn extension_str(&self) -> &str {
         self.extension.as_str()
@@ -226,144 +198,104 @@ impl FileDocument {
         self.mime_type.as_str()
     }
 
-    /// Get the content as a String (for text files).
-    /// Returns the text content, or an empty string if binary.
-    pub fn content_string(&self) -> String {
-        match &self.content {
-            FileContent::Text(s) => s.clone(),
-            FileContent::Binary(_) => String::new(),
-        }
-    }
-
     /// Get the content as bytes (works for both text and binary).
     pub fn content_bytes(&self) -> &[u8] {
         self.content.as_bytes()
     }
-
-    /// Returns true if this file has text content.
-    pub fn is_text(&self) -> bool {
-        self.content.is_text()
-    }
-
-    /// Returns true if this file has binary content.
-    pub fn is_binary(&self) -> bool {
-        self.content.is_binary()
-    }
 }
 
-/// An entry in a directory's `docs` array.
-/// All fields are collaborative Text in pushwork.
+/// The `@patchwork` type marker present in all pushwork documents.
 ///
-/// The `name` field is marked as `#[key]` so that autosurgeon can properly
-/// track directory entries during CRDT reconciliation. This enables correct
-/// merging when entries are added/removed concurrently by different clients.
+/// This nested structure contains the document type discriminator.
+/// The `type` field is a Text object (collaborative string) in pushwork.
 #[derive(Debug, Clone, Reconcile, Hydrate)]
-pub struct DirectoryEntry {
-    /// Entry name (filename or subdirectory name) - collaborative Text
-    /// This is the key field for CRDT reconciliation of the docs array.
-    #[key]
-    pub name: Text,
-
-    /// Entry type: "file" or "folder" - collaborative Text
+pub struct PatchworkMarker {
+    /// The document type: "file" or "folder" (as collaborative Text)
     #[autosurgeon(rename = "type")]
-    pub entry_type: Text,
-
-    /// Automerge URL of the child document - collaborative Text
-    pub url: Text,
+    pub doc_type: Text,
 }
 
-impl DirectoryEntry {
-    pub fn file(name: String, url: String) -> Self {
+impl PatchworkMarker {
+    pub fn file() -> Self {
         Self {
-            name: Text::with_value(name),
-            entry_type: Text::with_value("file"),
-            url: Text::with_value(url),
+            doc_type: Text::with_value("file"),
         }
     }
 
-    pub fn folder(name: String, url: String) -> Self {
+    pub fn folder() -> Self {
         Self {
-            name: Text::with_value(name),
-            entry_type: Text::with_value("folder"),
-            url: Text::with_value(url),
+            doc_type: Text::with_value("folder"),
         }
     }
 
-    pub fn name_str(&self) -> &str {
-        self.name.as_str()
-    }
-
-    pub fn entry_type_str(&self) -> &str {
-        self.entry_type.as_str()
-    }
-
-    pub fn url_str(&self) -> &str {
-        self.url.as_str()
+    #[cfg(test)]
+    pub fn doc_type_str(&self) -> &str {
+        self.doc_type.as_str()
     }
 }
 
-/// A directory document matching the pushwork schema.
+/// Metadata for a file document.
+#[derive(Debug, Clone, PartialEq, Eq, Reconcile, Hydrate)]
+pub struct FileMetadata {
+    /// Unix permissions as decimal (e.g., 644)
+    /// Stored as i64 in Automerge (JavaScript number -> Int)
+    pub permissions: i64,
+}
+
+/// File content that can be either text (String) or binary (bytes).
 ///
-/// Schema:
-/// ```json
-/// {
-///   "@patchwork": { "type": "folder" },
-///   "docs": [
-///     { "name": "file.txt", "type": "file", "url": "automerge:..." },
-///     ...
-///   ],
-///   "lastSyncAt": 1234567890
-/// }
-/// ```
-#[derive(Debug, Clone, Reconcile, Hydrate)]
-pub struct DirectoryDocument {
-    /// Type marker - always `{ type: "folder" }`
-    #[autosurgeon(rename = "@patchwork")]
-    pub patchwork: PatchworkMarker,
-
-    /// Array of directory entries
-    pub docs: Vec<DirectoryEntry>,
-
-    /// Unix timestamp (ms) of last sync, if any.
-    /// This field may be absent in pushwork documents, so we use missing = "Default::default"
-    /// Automerge stores integers as i64 (Int), not u64.
-    #[autosurgeon(rename = "lastSyncAt", missing = "Default::default")]
-    pub last_sync_at: Option<i64>,
+/// This enum has custom Reconcile/Hydrate implementations that:
+/// - Reconcile: writes String scalar for Text, Bytes scalar for Binary
+/// - Hydrate: inspects the Automerge value type to determine which variant
+///
+/// This matches pushwork's behavior where text files use ImmutableString
+/// and binary files use Bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileContent {
+    /// Text content stored as Automerge scalar string
+    Text(String),
+    /// Binary content stored as Automerge Bytes
+    Binary(Vec<u8>),
 }
 
-impl DirectoryDocument {
-    /// Create a new empty directory document.
-    pub fn new() -> Self {
-        Self {
-            patchwork: PatchworkMarker::folder(),
-            docs: Vec::new(),
-            last_sync_at: None,
+impl FileContent {
+    /// Create text content from a string.
+    pub fn text(s: impl Into<String>) -> Self {
+        Self::Text(s.into())
+    }
+
+    /// Create binary content from bytes.
+    pub fn binary(b: impl Into<Vec<u8>>) -> Self {
+        Self::Binary(b.into())
+    }
+
+    /// Get the content as bytes (works for both text and binary).
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Text(s) => s.as_bytes(),
+            Self::Binary(b) => b,
         }
-    }
-
-    /// Create a directory with entries.
-    pub fn with_entries(entries: Vec<DirectoryEntry>) -> Self {
-        Self {
-            patchwork: PatchworkMarker::folder(),
-            docs: entries,
-            last_sync_at: None,
-        }
-    }
-
-    /// Add a file entry to the directory.
-    pub fn add_file(&mut self, name: String, url: String) {
-        self.docs.push(DirectoryEntry::file(name, url));
-    }
-
-    /// Add a folder entry to the directory.
-    pub fn add_folder(&mut self, name: String, url: String) {
-        self.docs.push(DirectoryEntry::folder(name, url));
     }
 }
 
-impl Default for DirectoryDocument {
-    fn default() -> Self {
-        Self::new()
+impl Reconcile for FileContent {
+    type Key<'a> = NoKey;
+
+    fn reconcile<R: Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
+        match self {
+            Self::Text(s) => reconciler.str(s),
+            Self::Binary(b) => reconciler.bytes(b),
+        }
+    }
+}
+
+impl Hydrate for FileContent {
+    fn hydrate_string(s: &str) -> Result<Self, HydrateError> {
+        Ok(Self::Text(s.to_string()))
+    }
+
+    fn hydrate_bytes(bytes: &[u8]) -> Result<Self, HydrateError> {
+        Ok(Self::Binary(bytes.to_vec()))
     }
 }
 
@@ -372,7 +304,6 @@ mod tests {
     use super::*;
     use automerge::{AutoCommit, ReadDoc};
     use autosurgeon::{hydrate, reconcile};
-
 
     #[test]
     fn test_content_field_is_scalar_string() {
@@ -427,11 +358,10 @@ mod tests {
         let hydrated: FileDocument = hydrate(&doc).expect("hydrate failed");
 
         assert_eq!(hydrated.patchwork.doc_type_str(), "file");
-        assert_eq!(hydrated.name_str(), "image.png");
+        assert_eq!(hydrated.name.as_str(), "image.png");
         assert_eq!(hydrated.extension_str(), "png");
         assert_eq!(hydrated.mime_type_str(), "image/png");
-        assert!(hydrated.is_binary());
-        assert!(!hydrated.is_text());
+        assert!(matches!(hydrated.content, FileContent::Binary(_)));
         assert_eq!(hydrated.content_bytes(), binary_content.as_slice());
         assert_eq!(hydrated.metadata.permissions, 644);
     }
@@ -490,8 +420,10 @@ mod tests {
         let hydrated: FileContent =
             autosurgeon::hydrate_prop(&doc, automerge::ROOT, "content").expect("hydrate failed");
 
-        assert!(hydrated.is_text());
-        assert_eq!(hydrated.as_text(), Some("Hello, world!"));
+        let FileContent::Text(text) = hydrated else {
+            panic!("Expected Text content, got {:?}", hydrated);
+        };
+        assert_eq!(text, "Hello, world!");
     }
 
     /// Test FileContent enum with binary data
@@ -507,7 +439,9 @@ mod tests {
         let hydrated: FileContent =
             autosurgeon::hydrate_prop(&doc, automerge::ROOT, "content").expect("hydrate failed");
 
-        assert!(hydrated.is_binary());
-        assert_eq!(hydrated.as_binary(), Some(bytes.as_slice()));
+        let FileContent::Binary(binary) = hydrated else {
+            panic!("Expected Binary content, got {:?}", hydrated);
+        };
+        assert_eq!(binary, bytes.as_slice());
     }
 }

@@ -1,22 +1,17 @@
 use clap::{Parser, Subcommand};
 use samod::AutomergeUrl;
-use tokio_tungstenite::connect_async;
 
 mod clone;
 mod commands;
 mod config;
 mod documents;
 mod files;
-mod move_detector;
 mod pushwork_paths;
 pub(crate) use pushwork_paths::PushworkPaths;
 
 use crate::config::Config;
-mod scanner;
 mod snapshot;
 mod sync;
-mod sync_ops;
-mod sync_tasks;
 
 #[derive(Parser)]
 #[command(name = "thrustwork")]
@@ -63,7 +58,7 @@ async fn main() {
                 std::process::exit(1);
             });
 
-            let config = Config::load(&cwd).unwrap_or_else(|e| {
+            let config = Config::find_from_cwd(&cwd).unwrap_or_else(|_e| {
                 eprintln!("Not in a thrustwork directory (no .pushwork found)");
                 eprintln!("Run 'thrustwork init' to initialize this directory.");
                 std::process::exit(1);

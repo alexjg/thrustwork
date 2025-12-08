@@ -1,33 +1,17 @@
 //! Clone command implementation for pulling remote directories.
 //!
-//! Uses the parallel task-based architecture for efficient fetching
-//! of nested directories and files.
+//! Uses the new sync engine architecture. Clone is essentially syncing
+//! with an empty filesystem and empty snapshot - everything in the repo
+//! becomes RemoteNew and gets pulled.
 
 use samod::{AutomergeUrl, Connection, Repo};
 use thiserror::Error;
 
 use crate::config::Config;
 use crate::snapshot::Snapshot;
-use crate::sync_tasks::{SyncContext, SyncSummary, run_clone};
-
-/// Errors that can occur during clone operations
-#[derive(Debug, Error)]
-pub enum CloneError {
-    #[error("Invalid URL: {0}")]
-    InvalidUrl(String),
-
-    #[error("Failed to connect to sync server: {0}")]
-    ConnectionFailed(String),
-
-    #[error("Failed to save config: {0}")]
-    SaveConfig(String),
-
-    #[error("Failed to save snapshot: {0}")]
-    SaveSnapshot(String),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-}
+use crate::sync::{
+    ExecuteContext, FsState, RepoState, SnapState, SyncSummary, build_sync_plan, execute_sync_plan,
+};
 
 /// Result of cloning a directory
 pub struct CloneResult {
@@ -35,49 +19,65 @@ pub struct CloneResult {
     pub errors: usize,
 }
 
-/// Execute the full clone operation
+/// Execute the full clone operation.
+///
+/// This works by treating clone as a sync with an empty local state.
+/// Everything in the repo is classified as RemoteNew and pulled down.
 pub(crate) async fn execute_clone(
     config: Config,
     repo: Repo,
     conn: Connection,
-    root_url: AutomergeUrl,
+    _root_url: AutomergeUrl,
 ) -> Result<CloneResult, CloneError> {
     let conn_id = conn.id();
+    let root = config.root_dir();
+    let root_url = config.root_doc_url();
 
-    // Create empty snapshot
-    let snapshot = Snapshot::new(config.root_dir(), Some(root_url.clone()));
+    // Create empty states - nothing on disk yet, no previous sync
+    let fs_state = FsState::new();
+    let snap_state = SnapState::new();
 
-    // Create sync context (move_threshold not relevant for clone, but required)
-    let ctx = SyncContext::new(config.clone(), repo.clone(), conn_id, snapshot);
+    // Load the full repo state from the root document
+    let repo_state = RepoState::load(&repo, root_url, conn_id)
+        .await
+        .map_err(|e| CloneError::RepoState(e.to_string()))?;
 
-    println!("Cloning from: {}", root_url);
+    // Build sync plan - everything will be RemoteNew
+    let plan = build_sync_plan(fs_state, snap_state, repo_state, root);
 
-    let results = run_clone(&ctx).await;
+    // Create snapshot to track what we clone
+    let mut snapshot = Snapshot::new(root, Some(root_url.clone()));
 
-    // Get the snapshot and save it
-    let snapshot = ctx.snapshot.lock().await;
+    // Execute the plan
+    let mut ctx = ExecuteContext::new(&repo, conn_id, root, &mut snapshot);
+    let results = execute_sync_plan(plan, &mut ctx).await;
 
-    // Save snapshot
-    let mut snapshot_to_save = snapshot.clone();
-    snapshot_to_save.update_timestamp();
-    snapshot_to_save
+    // Save the snapshot
+    snapshot.update_timestamp();
+    snapshot
         .save(&config.snapshot_path())
         .map_err(|e| CloneError::SaveSnapshot(e.to_string()))?;
 
-    drop(snapshot);
-
     // Count results
     let summary = SyncSummary::from_results(&results);
-    let files_cloned = summary.pulled;
-    let errors = summary.errors.len();
-
-    println!("\nCloned {} file(s).", files_cloned);
-    if errors > 0 {
-        println!("{} error(s) occurred.", errors);
-    }
+    let files_cloned = summary.pulled + summary.dir_created_remote;
+    let errors = summary.errors;
 
     Ok(CloneResult {
         files_cloned,
         errors,
     })
+}
+
+/// Errors that can occur during clone operations
+#[derive(Debug, Error)]
+pub enum CloneError {
+    #[error("Failed to save snapshot: {0}")]
+    SaveSnapshot(String),
+
+    #[error("Failed to load repo state: {0}")]
+    RepoState(String),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
